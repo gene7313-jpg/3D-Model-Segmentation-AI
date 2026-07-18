@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+data/raw/
+data/synthetic/*.stl
+data/synthetic/*.obj
+.DS_Store
+*.3mf
+*.lys
+*.pm3n
+.idea/
+.vscode/

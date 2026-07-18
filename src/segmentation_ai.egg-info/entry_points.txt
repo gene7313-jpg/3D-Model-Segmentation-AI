@@ -1,0 +1,2 @@
+[console_scripts]
+segmentation-ai = segmentation_ai.cli:main

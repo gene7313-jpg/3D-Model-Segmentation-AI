@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+src/segmentation_ai/__init__.py
+src/segmentation_ai/cli.py
+src/segmentation_ai/cut.py
+src/segmentation_ai/printer.py
+src/segmentation_ai/shapes.py
+src/segmentation_ai.egg-info/PKG-INFO
+src/segmentation_ai.egg-info/SOURCES.txt
+src/segmentation_ai.egg-info/dependency_links.txt
+src/segmentation_ai.egg-info/entry_points.txt
+src/segmentation_ai.egg-info/requires.txt
+src/segmentation_ai.egg-info/top_level.txt

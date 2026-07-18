@@ -1,0 +1,13 @@
+domain: mechanical  # mechanical | organic (organic track later)
+printer_profile: bambu_p1s
+units: mm
+# Mechanical defaults
+mechanical:
+  min_wall_mm: 1.2
+  pin_diameter_mm: 3.0
+  pin_clearance_mm: 0.2
+  prefer_planar_registers: true
+# Contoured cut defaults
+cut:
+  surface_samples: 64
+  fill_caps: true

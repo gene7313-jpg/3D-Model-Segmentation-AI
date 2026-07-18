@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "segmentation-ai"
+version = "0.1.0"
+description = "Build-plate-aware contoured 3D model segmentation for printing"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "trimesh>=4.4",
+  "pyyaml>=6.0",
+  "scipy>=1.11",
+  "shapely>=2.0",
+  "manifold3d>=2.5",
+  "rtree>=1.2",
+]
+
+[project.scripts]
+segmentation-ai = "segmentation_ai.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

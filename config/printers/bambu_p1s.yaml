@@ -1,0 +1,14 @@
+# Bambu Lab P1S — default printer profile for part size limits
+name: bambu_p1s
+display_name: Bambu Lab P1S
+build_volume_mm:
+  x: 256.0
+  y: 256.0
+  z: 256.0
+# Keep parts inside usable bed area
+margin_mm: 2.0
+# Optional: treat Z differently if you always print with a raft/brim
+# (still counts toward Z limit)
+notes: >
+  Every exported part AABB must fit within
+  (x - 2*margin) × (y - 2*margin) × (z - 2*margin).
