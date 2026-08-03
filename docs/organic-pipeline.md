@@ -29,7 +29,18 @@ Apply the printability nodes to **existing** organic projects under `data/raw/or
 | **pins** | `pins.py` via `--with-pins` | Male pin + female socket on mating cut faces (run on basic-cut meshes) |
 | **batch** | `process-organic` / `process-organic-batch` | Run nodes on one or many existing slugs |
 
-**Quality note:** Do **not** use `--repair-mode auto/voxel` for display/print detail. `auto` now equals `basic`. Coarse voxel remesh (~2 mm pitch) turns shoes into LEGO; only use `--repair-mode voxel --voxel-resolution 160+` when you explicitly need a watertight shell.
+**Quality-first workflow (current focus):**
+
+```bash
+# High-res split only — no pins, no remesh
+segmentation-ai process-organic data/raw/organic/shoe_cli_full \
+  --force-split \
+  --repair-mode basic
+```
+
+Expect `parts/part_*.stl` face counts on the same order as half of `source_120mm.stl` (~80k–120k), not ~12k.
+
+Pins are **secondary**. `--with-pins` concatenates male pins without remeshing; sockets need a solid volume and only remesh if you pass `--pin-remesh` (quality tradeoff).
 
 ## Existing project prerequisites
 

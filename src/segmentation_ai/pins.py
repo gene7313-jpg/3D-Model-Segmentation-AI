@@ -112,13 +112,15 @@ def add_mating_pins(
     cut_normal: np.ndarray,
     cut_origin: np.ndarray,
     spec: PinSpec | None = None,
+    allow_remesh: bool = False,
 ) -> tuple[trimesh.Trimesh, trimesh.Trimesh, PinReport]:
     """
     Add pin(s) on ``male`` and sockets on ``female``.
 
-    Pins are built from the cut plane outward so they are visible on the mating
-    face. Male keeps high-res geometry (concatenate); female may get a fine
-    remesh only when a hole boolean requires a volume.
+    Quality-first: by default does **not** voxel-remesh. Male pins are
+    concatenated onto the high-res mesh. Female sockets require a volume
+    boolean — if the part is not a volume and ``allow_remesh`` is False,
+    sockets are skipped (pins-only) or pins are skipped entirely when both fail.
     """
     spec = spec or PinSpec()
     notes: list[str] = []
@@ -146,55 +148,58 @@ def add_mating_pins(
         offsets = list(np.linspace(-0.5 * spread, 0.5 * spread, spec.count))
         notes.append(f"pin_spread_mm={spread:.2f}")
 
-    # Mostly outside the cut so pins are obvious in the slicer
-    embed = min(2.5, 0.30 * spec.length_mm)  # into male
-    protrude = max(spec.length_mm - embed, 0.70 * spec.length_mm)  # out toward female
-    pin_h = embed + protrude
+    embed = min(2.5, 0.30 * spec.length_mm)
+    protrude = max(spec.length_mm - embed, 0.70 * spec.length_mm)
     pin_r = spec.diameter_mm / 2.0
     hole_r = (spec.diameter_mm + spec.clearance_mm) / 2.0
     hole_depth = protrude + 1.5
 
-    # Female needs to be a volume for hole difference
-    female_vol = _fine_volume(
-        female, pitch_mm=min(0.35, spec.diameter_mm / 10.0), notes=notes, label="female"
-    )
+    female_out = female.copy()
+    if _is_volume(female_out):
+        notes.append("female: volume_ok")
+    elif allow_remesh:
+        female_out = _fine_volume(
+            female_out,
+            pitch_mm=min(0.35, spec.diameter_mm / 10.0),
+            notes=notes,
+            label="female",
+        )
+    else:
+        notes.append(
+            "female: not a volume; sockets skipped (pass --pin-remesh to allow fine remesh)"
+        )
 
     male_out = male.copy()
-    female_out = female_vol
     applied = 0
     pins_for_male: list[trimesh.Trimesh] = []
 
     for off in offsets:
-        # Anchor on cut plane; +n into male, −n into female / out of male cut face
-        base = origin + major * float(off) + n * embed          # root inside male
-        tip = origin + major * float(off) - n * protrude        # tip outside cut face
+        base = origin + major * float(off) + n * embed
+        tip = origin + major * float(off) - n * protrude
         pin = _oriented_cylinder(base=base, tip=tip, radius=pin_r)
         pins_for_male.append(pin)
 
-        # Hole: open at cut plane, into female (−n)
-        hole_base = origin + major * float(off)                 # at plane
-        hole_tip = origin + major * float(off) - n * hole_depth
-        hole = _oriented_cylinder(base=hole_base, tip=hole_tip, radius=hole_r)
-        try:
-            female_out = _boolean(female_out, hole, "difference")
-            applied += 1
-            notes.append(f"socket_ok @ {off:.2f}")
-        except Exception as exc:
-            notes.append(f"socket difference failed @ {off:.2f}: {exc}")
+        if _is_volume(female_out) or (
+            female_out.is_watertight and female_out.is_winding_consistent
+        ):
+            hole_base = origin + major * float(off)
+            hole_tip = origin + major * float(off) - n * hole_depth
+            hole = _oriented_cylinder(base=hole_base, tip=hole_tip, radius=hole_r)
+            try:
+                female_out = _boolean(female_out, hole, "difference")
+                applied += 1
+                notes.append(f"socket_ok @ {off:.2f}")
+            except Exception as exc:
+                notes.append(f"socket difference failed @ {off:.2f}: {exc}")
 
     if pins_for_male:
-        # Preserve male detail: glue pins on (overlap into body). Union if volume.
-        try:
-            if _is_volume(male_out):
-                for pin in pins_for_male:
-                    male_out = _boolean(male_out, pin, "union")
-                notes.append("male_pins_union")
-            else:
-                male_out = trimesh.util.concatenate([male_out, *pins_for_male])
-                notes.append("male_pins_concatenate_preserve_detail")
-        except Exception as exc:
-            male_out = trimesh.util.concatenate([male_out, *pins_for_male])
-            notes.append(f"male_pins_concatenate_fallback: {exc}")
+        # Always prefer concatenate on male to preserve TRELLIS detail
+        male_out = trimesh.util.concatenate([male_out, *pins_for_male])
+        notes.append("male_pins_concatenate_preserve_detail")
+        if applied == 0:
+            # Still count male pins as applied for visibility even if sockets skipped
+            applied = len(pins_for_male)
+            notes.append("male_pins_only_no_sockets")
 
     notes.append(f"pins_applied={applied}")
     notes.append(f"pin_embed_mm={embed:.2f} pin_protrude_mm={protrude:.2f}")

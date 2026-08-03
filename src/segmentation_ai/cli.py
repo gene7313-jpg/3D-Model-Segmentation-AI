@@ -126,6 +126,7 @@ def _organic_cut_kwargs(args: argparse.Namespace) -> dict:
         voxel_resolution=args.voxel_resolution,
         pitch_mm=args.pitch_mm,
         with_pins=args.with_pins,
+        pin_remesh=getattr(args, "pin_remesh", False),
     )
 
 
@@ -354,7 +355,12 @@ def main() -> None:
     p6.add_argument(
         "--with-pins",
         action="store_true",
-        help="Add mating pin/socket on the cut face (2-part splits only)",
+        help="Add mating pins (male kept high-res; sockets need --pin-remesh if not solid)",
+    )
+    p6.add_argument(
+        "--pin-remesh",
+        action="store_true",
+        help="Allow fine remesh of female part for socket booleans (can reduce quality)",
     )
     p6.set_defaults(func=cmd_cut_organic)
 
@@ -367,6 +373,11 @@ def main() -> None:
         p.add_argument("--voxel-resolution", type=int, default=None)
         p.add_argument("--pitch-mm", type=float, default=None)
         p.add_argument("--with-pins", action="store_true")
+        p.add_argument(
+            "--pin-remesh",
+            action="store_true",
+            help="Allow fine remesh for pin sockets (quality tradeoff)",
+        )
 
     p7 = sub.add_parser(
         "process-organic",

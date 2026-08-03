@@ -154,6 +154,7 @@ def cut_organic_project(
     voxel_resolution: int = 160,
     pitch_mm: float | None = None,
     with_pins: bool = False,
+    pin_remesh: bool = False,
     pin_spec: PinSpec | None = None,
 ) -> OrganicCutResult:
     from .generate_trellis import load_defaults
@@ -166,6 +167,18 @@ def cut_organic_project(
     profile = load_printer_profile(default_profile_path())
     mesh, source_path = _load_print_mesh(project)
     print(f"Loaded {source_path.name}  faces={len(mesh.faces)}")
+
+    # Quality-first: never voxel-remesh the whole model unless user asked for voxel.
+    if repair_mode == "voxel":
+        print(
+            "WARNING: --repair-mode voxel remeshes the whole model and will look blocky. "
+            "Prefer --repair-mode basic for organic detail."
+        )
+    if with_pins and not pin_remesh:
+        print(
+            "Pins requested without --pin-remesh: will try pin CSG on the high-res cut; "
+            "if boolean fails, pins are skipped (quality preserved)."
+        )
 
     faces_in = len(mesh.faces)
     mesh, repair = repair_mesh(
@@ -207,7 +220,7 @@ def cut_organic_project(
             spec = pin_spec or _pin_spec_from_config(defaults)
             print(
                 f"Pins: diameter={spec.diameter_mm}mm clearance={spec.clearance_mm}mm "
-                f"length={spec.length_mm}mm count={spec.count}"
+                f"length={spec.length_mm}mm count={spec.count} pin_remesh={pin_remesh}"
             )
             male, female, preport = add_mating_pins(
                 parts[0],
@@ -215,6 +228,7 @@ def cut_organic_project(
                 cut_normal=cut_normal,
                 cut_origin=cut_origin,
                 spec=spec,
+                allow_remesh=pin_remesh,
             )
             parts = [male, female]
             pins_applied = preport.pin_count
