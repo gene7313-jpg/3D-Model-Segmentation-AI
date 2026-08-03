@@ -17,6 +17,7 @@ dependencies = [
   "manifold3d>=2.5",
   "rtree>=1.2",
   "networkx>=3.0",
+  "scikit-image>=0.22",
 ]
 
 [project.scripts]

@@ -126,6 +126,9 @@ def cmd_cut_organic(args: argparse.Namespace) -> None:
         args.project_dir,
         max_splits=args.max_splits,
         force_split=args.force_split,
+        repair_mode=args.repair_mode,
+        voxel_resolution=args.voxel_resolution,
+        pitch_mm=args.pitch_mm,
     )
     if not result.all_fit:
         raise SystemExit(1)
@@ -290,17 +293,39 @@ def main() -> None:
         action="store_true",
         help="Split once along longest axis even if the whole mesh already fits P1S",
     )
+    p6.add_argument(
+        "--repair-mode",
+        default=None,
+        choices=["basic", "voxel", "auto"],
+        help="Mesh repair: basic | voxel (watertight remesh) | auto (default)",
+    )
+    p6.add_argument(
+        "--voxel-resolution",
+        type=int,
+        default=None,
+        help="Voxel grid resolution along longest axis when remeshing (default: 64)",
+    )
+    p6.add_argument(
+        "--pitch-mm",
+        type=float,
+        default=None,
+        help="Optional explicit voxel pitch in mm (overrides --voxel-resolution)",
+    )
     p6.set_defaults(func=cmd_cut_organic)
 
     args = parser.parse_args()
 
     # Fill organic cut defaults from config when CLI omitted them
-    if getattr(args, "cmd", None) == "cut-organic" or getattr(args, "func", None) is cmd_cut_organic:
+    if getattr(args, "func", None) is cmd_cut_organic:
         from .generate_trellis import load_defaults
 
-        org = (load_defaults().get("organic_cut") or {})
+        org = load_defaults().get("organic_cut") or {}
         if getattr(args, "max_splits", None) is None:
             args.max_splits = int(org.get("max_splits", 3))
+        if getattr(args, "repair_mode", None) is None:
+            args.repair_mode = str(org.get("repair_mode", "auto"))
+        if getattr(args, "voxel_resolution", None) is None:
+            args.voxel_resolution = int(org.get("voxel_resolution", 64))
 
     args.func(args)
 

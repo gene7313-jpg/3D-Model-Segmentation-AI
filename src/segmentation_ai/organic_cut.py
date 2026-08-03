@@ -16,7 +16,7 @@ from .printer import (
     load_printer_profile,
     part_fits_build_plate,
 )
-from .repair import repair_mesh
+from .repair import RepairMode, repair_mesh
 
 
 @dataclass
@@ -27,6 +27,7 @@ class OrganicCutResult:
     all_fit: bool
     watertight: bool
     fit_reports: list[str]
+    repaired_path: Path | None = None
 
 
 def _load_print_mesh(project: Path) -> tuple[trimesh.Trimesh, Path]:
@@ -115,6 +116,9 @@ def cut_organic_project(
     *,
     max_splits: int = 3,
     force_split: bool = False,
+    repair_mode: RepairMode = "auto",
+    voxel_resolution: int = 64,
+    pitch_mm: float | None = None,
 ) -> OrganicCutResult:
     project = Path(project_dir).expanduser().resolve()
     if not project.is_dir():
@@ -124,13 +128,24 @@ def cut_organic_project(
     mesh, source_path = _load_print_mesh(project)
     print(f"Loaded {source_path.name}  faces={len(mesh.faces)}")
 
-    mesh, repair = repair_mesh(mesh)
+    mesh, repair = repair_mesh(
+        mesh,
+        mode=repair_mode,
+        pitch_mm=pitch_mm,
+        voxel_resolution=voxel_resolution,
+    )
     print(
-        f"Repair: watertight {repair.watertight_before} → {repair.watertight_after} "
+        f"Repair ({repair.mode}): watertight {repair.watertight_before} → {repair.watertight_after} "
         f"faces {repair.faces_before} → {repair.faces_after}"
     )
+    if repair.pitch_mm is not None:
+        print(f"  voxel pitch_mm={repair.pitch_mm:.4f}")
     for note in repair.notes:
         print(f"  {note}")
+
+    repaired_path = project / "source_repaired.stl"
+    mesh.export(repaired_path)
+    print(f"Wrote {repaired_path}")
 
     parts = split_until_fits(
         mesh,
@@ -175,10 +190,13 @@ def cut_organic_project(
     meta["cut_track"] = "organic"
     meta["cut_source_stl"] = source_path.name
     meta["repair"] = {
+        "mode": repair.mode,
         "watertight_before": repair.watertight_before,
         "watertight_after": repair.watertight_after,
         "faces_before": repair.faces_before,
         "faces_after": repair.faces_after,
+        "pitch_mm": repair.pitch_mm,
+        "repaired_stl": repaired_path.name,
         "notes": repair.notes,
     }
     meta["organic_cut"] = {
@@ -200,4 +218,5 @@ def cut_organic_project(
         all_fit=bool(result.all_fit),
         watertight=bool(repair.watertight_after),
         fit_reports=result.fit_reports,
+        repaired_path=repaired_path,
     )

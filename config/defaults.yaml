@@ -22,3 +22,5 @@ trellis:
 organic_cut:
   max_splits: 3
   strategy: longest_axis_midplane
+  repair_mode: auto          # basic | voxel | auto
+  voxel_resolution: 64       # cells along longest axis for watertight remesh

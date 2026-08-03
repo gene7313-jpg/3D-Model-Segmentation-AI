@@ -184,7 +184,17 @@ Scale-to-mm stays in Phase C (`generate-from-image`). Contoured polylines remain
 
 **Exit criteria:** Photo → printable multi-part organic kit without leaving the two-repo workflow.
 
-**Done (2026-08-02 Mac Studio):** `cut-organic data/raw/organic/shoe_cli_full --force-split` → 2 parts (~42×60×51 and ~53×36×60 mm), All fit: True. Mesh still not fully watertight after repair (TRELLIS.mac holes); plane slice+cap succeeded anyway.
+**Done (2026-08-02 Mac Studio):** `cut-organic data/raw/organic/shoe_cli_full --force-split` → 2 parts (~42×60×51 and ~53×36×60 mm), All fit: True. Mesh still not fully watertight after basic repair (TRELLIS.mac holes); plane slice+cap succeeded anyway.
+
+### Stronger repair (post–Phase D)
+
+`cut-organic` supports `--repair-mode auto|basic|voxel` (default **auto**):
+
+1. **basic** — normals / fill_holes / cleanup / largest component  
+2. **voxel** — force watertight via voxelize → fill → marching cubes (`scikit-image`)  
+3. **auto** — basic, then voxel if still open  
+
+Writes `source_repaired.stl` before cutting. Tune with `--voxel-resolution 64` or `--pitch-mm`.
 
 ## Dependency boundary
 
