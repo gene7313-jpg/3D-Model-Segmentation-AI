@@ -158,6 +158,10 @@ Config: `config/defaults.yaml` → `trellis.*`
 
 **Exit criteria:** One command produces a staged organic project ready for human cut or later Phase 4.
 
+**Done (2026-08-02 Mac Studio):**
+- Dry-run: `smoke_test_cli` via `--skip-generate` → Fits P1S at 120 mm
+- Full run: `shoe_cli_full` via subprocess to trellis-mac (~71s gen+bake, weights cached) → `source_120mm.stl`, Fits P1S: True, Watertight: False
+
 ### Phase D — Organic cut track (aligns with roadmap Phase 4)
 
 1. Repair pass (fill small holes from skipped `cumesh`).
