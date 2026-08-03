@@ -112,11 +112,14 @@ notes: "Figurine from photo; cut for P1S after repair"
 ### Phase B — Manual bridge (no code in this repo yet)
 
 1. Copy GLB/OBJ + source image into `data/raw/organic/<slug>/`.
-2. Convert / repair to a single watertight STL for cutting (Blender, trimesh, or Meshmixer).
-3. Run existing validate path once a cut CLI accepts arbitrary STL (today: ingest/validate patterns).
-4. Manually cut oversized assets in Studio if needed; store part STLs + `meta.yaml`.
+2. Convert to STL with trimesh (`Scene.to_geometry()`, `repair.fill_holes`). Expect `watertight=False` from the Mac port.
+3. **Scale from TRELLIS unit-cube to mm** before build-plate checks. Raw extents are ~1 unit; a typical figurine target is longest axis ≈ 100–150 mm. Example smoke test: scale ≈ 120 → **42.7 × 55.7 × 120 mm**, fits P1S.
+4. Write `meta.yaml` including `print_stl`, `scale_to_mm`, and `watertight`.
+5. Repair for watertightness before boolean / contoured cuts; display GLB can stay as-generated.
 
 **Exit criteria:** At least one organic project folder follows the convention above.
+
+**Done (2026-08-02 smoke test on Mac Studio):** `data/raw/organic/smoke_test/` with `source.glb`, `source.stl`, `source_120mm.stl`, `source_image.png`, `meta.yaml`. trellis-mac sibling setup + first `generate.py` run succeeded.
 
 ### Phase C — Thin CLI glue in this repo
 
@@ -174,6 +177,8 @@ Do not add TRELLIS to `pyproject.toml` / `requirements.txt` unless we later deci
 | License (RMBG NC) | Personal/research OK; commercial needs BRIA license or alternate matting |
 | Huge meshes crash cut/boolean | Decimate for cut path; keep hi-res GLB for display |
 | HF gated model access | Document login + URL approvals in setup checklist |
+| TRELLIS outputs ~1-unit normalized | Always scale to mm before P1S checks / cutting |
+| MacBook vs Studio split | Push via GitHub (`gene7313-jpg/3D-Model-Segmentation-AI`); Studio clones; keep `data/raw` local |
 
 ## Decision log
 
