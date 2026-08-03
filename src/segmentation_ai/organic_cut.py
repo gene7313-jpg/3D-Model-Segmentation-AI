@@ -255,6 +255,7 @@ def cut_organic_project(
             parts_before = [p.copy() for p in parts]
 
             # Phase A — frozen male pins (optional)
+            shared_centers: list[tuple[float, float]] | None = None
             if with_pins:
                 male, female, preport = add_mating_pins(
                     parts[0],
@@ -270,6 +271,7 @@ def cut_organic_project(
                 pins_applied = preport.pin_count
                 pin_notes.extend(preport.notes)
                 pin_method = preport.method
+                shared_centers = preport.centers_uv or None
                 for note in preport.notes:
                     print(f"  pin: {note}")
                 print(f"Pins (male) applied: {pins_applied} method={pin_method}")
@@ -285,6 +287,7 @@ def cut_organic_project(
                     allow_remesh=pin_remesh,
                     apply_male=False,
                     apply_holes=True,
+                    centers_uv=shared_centers,
                 )
                 parts = [male, female]
                 pin_notes.extend(hreport.notes)

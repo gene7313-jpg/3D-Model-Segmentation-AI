@@ -40,6 +40,11 @@ class PinReport:
     used_remesh: bool
     method: str  # "male_only" | "cap_punch_step" | "boolean" | "none"
     notes: list[str] = field(default_factory=list)
+    centers_uv: list[tuple[float, float]] = field(default_factory=list)
+    layout_origin: np.ndarray | None = None
+    layout_normal: np.ndarray | None = None
+    layout_u: np.ndarray | None = None
+    layout_v: np.ndarray | None = None
 
 
 @dataclass
@@ -49,6 +54,11 @@ class PinApplyResult:
     used_remesh: bool
     method: str
     notes: list[str]
+    centers_uv: list[tuple[float, float]] = field(default_factory=list)
+    layout_origin: np.ndarray | None = None
+    layout_normal: np.ndarray | None = None
+    layout_u: np.ndarray | None = None
+    layout_v: np.ndarray | None = None
 
 
 @dataclass
@@ -491,6 +501,64 @@ def _refine_cut_near_hole(
     return out
 
 
+def _point_in_triangle_2d(
+    pu: float, pv: float, tri_uv: np.ndarray, eps: float = 1e-9
+) -> bool:
+    """Barycentric point-in-triangle test in UV."""
+    (ax, ay), (bx, by), (cx, cy) = tri_uv
+    v0x, v0y = cx - ax, cy - ay
+    v1x, v1y = bx - ax, by - ay
+    v2x, v2y = pu - ax, pv - ay
+    den = v0x * v1y - v1x * v0y
+    if abs(den) < eps:
+        return False
+    u = (v2x * v1y - v1x * v2y) / den
+    v = (v0x * v2y - v2x * v0y) / den
+    return u >= -eps and v >= -eps and (u + v) <= 1.0 + eps
+
+
+def _remove_cap_faces_in_circle(
+    mesh: Trimesh,
+    *,
+    plane_origin: np.ndarray,
+    plane_normal: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    center_uv: tuple[float, float],
+    hole_radius: float,
+    max_delete_area: float,
+) -> tuple[Trimesh, int]:
+    f_mask = _cut_face_mask(
+        mesh, plane_origin, plane_normal, cos_thresh=0.80, plane_tol_mm=0.75
+    )
+    if not np.any(f_mask):
+        return mesh, 0
+
+    pu, pv = center_uv
+    r2 = hole_radius**2
+    remove = np.zeros(len(mesh.faces), dtype=bool)
+    centers = mesh.triangles_center
+    for i in np.where(f_mask)[0]:
+        if _face_area(mesh, int(i)) > max_delete_area:
+            continue
+        cu, cv = _uv(centers[i], plane_origin, u, v)
+        if (cu - pu) ** 2 + (cv - pv) ** 2 <= r2:
+            remove[i] = True
+
+    n_removed = int(np.count_nonzero(remove))
+    if n_removed == 0:
+        return mesh, 0
+
+    keep = ~remove
+    try:
+        out = mesh.submesh([np.where(keep)[0]], append=True)
+    except Exception:
+        out = mesh.copy()
+        out.update_faces(keep)
+        out.remove_unreferenced_vertices()
+    return out, n_removed
+
+
 def _punch_one_socket(
     mesh: Trimesh,
     *,
@@ -501,47 +569,89 @@ def _punch_one_socket(
     center_uv: tuple[float, float],
     hole_radius: float,
 ) -> tuple[Trimesh, int]:
-    """Refine near one hole, then remove small cut-cap faces whose centroid is inside."""
-    refined = _refine_cut_near_hole(
-        mesh,
-        plane_origin=plane_origin,
-        plane_normal=plane_normal,
-        u=u,
-        v=v,
-        center_uv=center_uv,
-        hole_radius=hole_radius,
-    )
-    f_mask = _cut_face_mask(
-        refined, plane_origin, plane_normal, cos_thresh=0.80, plane_tol_mm=0.75
-    )
-    if not np.any(f_mask):
-        return mesh.copy(), 0
+    """
+    Refine near one hole, then remove cut-cap faces whose centroid is inside.
 
+    Retries with tighter refinement if the first pass removes nothing (common
+    when a pin sits on a large/odd cut triangle).
+    """
     pu, pv = center_uv
-    # Slightly inset so we don't nibble the hole rim aggressively
-    r2 = (hole_radius * 0.98) ** 2
-    remove = np.zeros(len(refined.faces), dtype=bool)
-    centers = refined.triangles_center
-    for i in np.where(f_mask)[0]:
-        # Only delete small faces (post-refine) whose centroid is inside
-        if _face_area(refined, int(i)) > 1.25:
-            continue
-        cu, cv = _uv(centers[i], plane_origin, u, v)
-        if (cu - pu) ** 2 + (cv - pv) ** 2 <= r2:
-            remove[i] = True
+    attempts = [
+        # (search_radius_scale, max_face_area, rounds, max_delete_area)
+        (1.05, 0.6, 6, 1.25),
+        (1.25, 0.25, 10, 2.0),
+        (1.40, 0.12, 12, 3.0),
+    ]
+    best = mesh
+    best_removed = 0
 
-    n_removed = int(np.count_nonzero(remove))
-    if n_removed == 0:
-        return refined, 0
+    for scale, max_area, rounds, max_del in attempts:
+        refined = _refine_cut_near_hole(
+            mesh,
+            plane_origin=plane_origin,
+            plane_normal=plane_normal,
+            u=u,
+            v=v,
+            center_uv=center_uv,
+            hole_radius=hole_radius * scale,
+            max_face_area=max_area,
+            max_rounds=rounds,
+        )
 
-    keep = ~remove
-    try:
-        out = refined.submesh([np.where(keep)[0]], append=True)
-    except Exception:
-        out = refined.copy()
-        out.update_faces(keep)
-        out.remove_unreferenced_vertices()
-    return out, n_removed
+        # If no face intersects the search circle, force-split the cut triangle
+        # that contains the pin center (if any).
+        f_mask = _cut_face_mask(
+            refined, plane_origin, plane_normal, cos_thresh=0.80, plane_tol_mm=0.75
+        )
+        hits = [
+            int(i)
+            for i in np.where(f_mask)[0]
+            if _face_intersects_circle(
+                refined,
+                int(i),
+                plane_origin,
+                u,
+                v,
+                pu,
+                pv,
+                hole_radius * scale,
+            )
+        ]
+        if not hits:
+            for i in np.where(f_mask)[0]:
+                tri = refined.vertices[refined.faces[i]]
+                tri_uv = np.array([_uv(p, plane_origin, u, v) for p in tri], dtype=float)
+                if _point_in_triangle_2d(pu, pv, tri_uv):
+                    # One forced refine round around a slightly larger radius
+                    refined = _refine_cut_near_hole(
+                        refined,
+                        plane_origin=plane_origin,
+                        plane_normal=plane_normal,
+                        u=u,
+                        v=v,
+                        center_uv=center_uv,
+                        hole_radius=max(hole_radius * 1.5, 3.0),
+                        max_face_area=0.1,
+                        max_rounds=8,
+                    )
+                    break
+
+        punched, n_removed = _remove_cap_faces_in_circle(
+            refined,
+            plane_origin=plane_origin,
+            plane_normal=plane_normal,
+            u=u,
+            v=v,
+            center_uv=center_uv,
+            hole_radius=hole_radius * 0.99,
+            max_delete_area=max_del,
+        )
+        if n_removed > best_removed:
+            best, best_removed = punched, n_removed
+        if n_removed > 0:
+            return punched, n_removed
+
+    return best, best_removed
 
 
 def punch_female_sockets_stepwise(
@@ -584,9 +694,10 @@ def punch_female_sockets_stepwise(
             continue
         out = punched
         total_removed += n_removed
+        status = "ok" if n_removed > 0 else "WARN empty"
         notes.append(
             f"hole[{step}/{len(centers_uv)}] center=({center[0]:.1f},{center[1]:.1f}) "
-            f"removed {n_removed} faces ({faces_before}→{len(out.faces)})"
+            f"removed {n_removed} faces ({faces_before}→{len(out.faces)}) [{status}]"
         )
 
     if total_removed == 0:
@@ -611,12 +722,14 @@ def apply_mating_pins(
     remesh_pitch_mm: float = 0.8,
     apply_male: bool = True,
     apply_holes: bool = False,
+    centers_uv: list[tuple[float, float]] | None = None,
 ) -> PinApplyResult:
     """
     Apply mating features in separate phases.
 
     - apply_male=True  → FROZEN male pin concatenate
     - apply_holes=True → stepwise female cap punch (one hole at a time)
+    - centers_uv       → reuse male-phase pin centers so holes align
     """
     notes: list[str] = []
     if spec is None:
@@ -636,6 +749,10 @@ def apply_mating_pins(
     if male_index is not None and female_index is not None:
         layout.male_index = male_index
         layout.female_index = female_index
+
+    if centers_uv is not None and len(centers_uv) > 0:
+        layout.centers_uv = list(centers_uv)
+        notes.append(f"reusing {len(centers_uv)} pin center(s) from male phase")
 
     notes.extend(layout.notes)
     out = list(parts)
@@ -714,6 +831,11 @@ def apply_mating_pins(
         used_remesh=used_remesh,
         method=method,
         notes=notes,
+        centers_uv=list(layout.centers_uv),
+        layout_origin=layout.origin,
+        layout_normal=layout.normal,
+        layout_u=layout.u,
+        layout_v=layout.v,
     )
 
 
@@ -728,6 +850,7 @@ def add_mating_pins(
     remesh_pitch_mm: float = 0.8,
     apply_male: bool = True,
     apply_holes: bool = False,
+    centers_uv: list[tuple[float, float]] | None = None,
 ) -> tuple[Trimesh, Trimesh, PinReport]:
     result = apply_mating_pins(
         [male, female],
@@ -740,11 +863,17 @@ def add_mating_pins(
         remesh_pitch_mm=remesh_pitch_mm,
         apply_male=apply_male,
         apply_holes=apply_holes,
+        centers_uv=centers_uv,
     )
     report = PinReport(
         pin_count=result.pins_applied,
         used_remesh=result.used_remesh,
         method=result.method,
         notes=result.notes,
+        centers_uv=result.centers_uv,
+        layout_origin=result.layout_origin,
+        layout_normal=result.layout_normal,
+        layout_u=result.layout_u,
+        layout_v=result.layout_v,
     )
     return result.parts[0], result.parts[1], report
