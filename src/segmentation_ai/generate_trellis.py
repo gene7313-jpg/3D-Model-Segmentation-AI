@@ -122,7 +122,10 @@ def glb_to_stl(glb_path: Path, stl_path: Path) -> tuple[trimesh.Trimesh, bool]:
     loaded = trimesh.load(glb_path, force="scene")
     mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
     mesh = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces, process=True)
-    trimesh.repair.fill_holes(mesh)
+    try:
+        trimesh.repair.fill_holes(mesh)
+    except Exception as exc:  # networkx optional at runtime; continue without fill
+        print(f"Warning: fill_holes skipped ({exc})")
     trimesh.repair.fix_normals(mesh)
     stl_path.parent.mkdir(parents=True, exist_ok=True)
     mesh.export(stl_path)
