@@ -16,7 +16,7 @@ import trimesh
 from shapely.geometry import MultiPolygon, Point, Polygon
 from shapely.ops import unary_union
 from trimesh import Trimesh
-from trimesh.creation import cylinder, extrude_polygon
+from trimesh.creation import cylinder, extrude_polygon, extrude_triangulation
 
 
 @dataclass
@@ -60,11 +60,28 @@ def _orthonormal_basis(n: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return u, v
 
 
-def _cut_face_mask(mesh: Trimesh, plane_normal: np.ndarray, cos_thresh: float = 0.85) -> np.ndarray:
+def _cut_face_mask(
+    mesh: Trimesh,
+    plane_origin: np.ndarray,
+    plane_normal: np.ndarray,
+    *,
+    cos_thresh: float = 0.85,
+    plane_tol_mm: float = 0.6,
+) -> np.ndarray:
+    """
+    Faces that form the planar cut cap: near the plane and aligned with ±normal.
+
+    Uses abs(normal·face) so either winding from slice_plane(cap=True) is found.
+    Without the plane-distance gate, a floating AABB wafer gets stacked on top
+    of an undetected cap (the 'rectangle on open shoe' failure mode).
+    """
     n = plane_normal / (np.linalg.norm(plane_normal) + 1e-12)
+    origin = np.asarray(plane_origin, dtype=float)
     fn = mesh.face_normals
-    dots = fn @ n
-    return dots >= cos_thresh
+    aligned = np.abs(fn @ n) >= cos_thresh
+    centers = mesh.triangles_center
+    dist = np.abs((centers - origin) @ n)
+    return aligned & (dist <= plane_tol_mm)
 
 
 def _cut_uv_bounds(
@@ -185,6 +202,47 @@ def _cut_face_polygon_2d(
     return _largest_polygon(unary_union(polys))
 
 
+def _make_extruded_cut_wafer(
+    mesh: Trimesh,
+    face_mask: np.ndarray,
+    origin: np.ndarray,
+    normal: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    thickness: float,
+) -> Trimesh:
+    """
+    Extrude the *exact* cut-cap triangulation into a thin solid.
+
+    Matches the female rim vertex-for-vertex (no AABB rectangle, no shapely
+    rebuild), then seats the solid into the female (-normal).
+    """
+    if not np.any(face_mask):
+        raise ValueError("no cut faces to extrude")
+    faces = np.asarray(mesh.faces[face_mask], dtype=np.int64)
+    used = np.unique(faces.ravel())
+    remap = np.full(int(used.max()) + 1, -1, dtype=np.int64)
+    remap[used] = np.arange(len(used), dtype=np.int64)
+    faces2 = remap[faces]
+    verts3 = np.asarray(mesh.vertices[used], dtype=float)
+    verts2 = np.column_stack(((verts3 - origin) @ u, (verts3 - origin) @ v))
+
+    # Ensure CCW in UV so extrusion +Z matches +normal after transform
+    tri = verts2[faces2[0]]
+    area2 = (tri[1, 0] - tri[0, 0]) * (tri[2, 1] - tri[0, 1]) - (
+        tri[2, 0] - tri[0, 0]
+    ) * (tri[1, 1] - tri[0, 1])
+    if area2 < 0:
+        faces2 = faces2[:, ::-1]
+
+    R = np.column_stack([u, v, normal])
+    T = np.eye(4)
+    T[:3, :3] = R
+    # z=thickness near plane (+0.05 toward male); z=0 deep in female
+    T[:3, 3] = origin - normal * (thickness - 0.05)
+    return extrude_triangulation(verts2, faces2, height=thickness, transform=T)
+
+
 def _make_outline_wafer(
     polygon: Polygon,
     origin: np.ndarray,
@@ -194,10 +252,7 @@ def _make_outline_wafer(
     thickness: float,
     margin: float,
 ) -> Trimesh:
-    """
-    Extrude the cut-face outline into a thin solid seated in the female (-normal).
-    Local +Z maps to world +normal; top face sits just proud of the cut plane.
-    """
+    """Fallback: extrude shapely outline if triangulation extrusion fails."""
     poly = polygon.buffer(margin) if margin > 0 else polygon
     poly = _largest_polygon(poly)
     if poly is None:
@@ -206,10 +261,23 @@ def _make_outline_wafer(
     R = np.column_stack([u, v, normal])
     T = np.eye(4)
     T[:3, :3] = R
-    # z=thickness → near plane (+0.05 toward male); z=0 deep in female
     T[:3, 3] = origin - normal * (thickness - 0.05)
     solid.apply_transform(T)
     return solid
+
+
+def _strip_faces(mesh: Trimesh, face_mask: np.ndarray) -> Trimesh:
+    """Remove masked faces; keep the rest of the triangulation intact."""
+    if not np.any(face_mask):
+        return mesh.copy()
+    keep = ~face_mask
+    try:
+        return mesh.submesh([np.where(keep)[0]], append=True)
+    except Exception:
+        out = mesh.copy()
+        out.update_faces(keep)
+        out.remove_unreferenced_vertices()
+        return out
 
 
 def _make_box_wafer(
@@ -364,35 +432,40 @@ def apply_mating_pins(
     male = parts[male_index].copy()
     female = parts[female_index].copy()
 
-    # Female cut faces point roughly +n (toward male / out of female)
-    f_mask = _cut_face_mask(female, n, cos_thresh=0.80)
-    m_mask = _cut_face_mask(male, -n, cos_thresh=0.80)
-    outline_mesh = female
-    outline_mask = f_mask
-    bounds = _cut_uv_bounds(female, origin, n, f_mask)
-    if bounds is None or not np.any(f_mask):
-        outline_mesh = male
-        outline_mask = m_mask
-        bounds = _cut_uv_bounds(male, origin, n, m_mask)
-        notes.append("used male cut-face outline (female cut faces not found)")
+    # Detect planar cut caps (either winding) near the seam plane.
+    f_mask = _cut_face_mask(female, origin, n, cos_thresh=0.80, plane_tol_mm=0.75)
+    m_mask = _cut_face_mask(male, origin, n, cos_thresh=0.80, plane_tol_mm=0.75)
+    notes.append(
+        f"cut-cap faces: female={int(np.count_nonzero(f_mask))} "
+        f"male={int(np.count_nonzero(m_mask))}"
+    )
+
+    # Prefer female cap triangulation for the wafer so the rim matches exactly.
+    # Fall back to male cap (same seam) if female cap wasn't found.
+    if np.any(f_mask):
+        wafer_src, wafer_mask, wafer_src_name = female, f_mask, "female"
+    elif np.any(m_mask):
+        wafer_src, wafer_mask, wafer_src_name = male, m_mask, "male"
+        notes.append("female cut cap not found; extruding male cut cap for sockets")
+    else:
+        return PinApplyResult(parts, 0, False, "none", ["no cut-face caps found"])
+
+    bounds = _cut_uv_bounds(wafer_src, origin, n, wafer_mask)
     if bounds is None:
         return PinApplyResult(parts, 0, False, "none", ["no cut-face bounds"])
 
     u, v, umin, umax, vmin, vmax = bounds
-    cut_poly = _cut_face_polygon_2d(outline_mesh, outline_mask, origin, u, v)
+    cut_poly = _cut_face_polygon_2d(wafer_src, wafer_mask, origin, u, v)
     if cut_poly is not None:
         centers = _pin_centers_in_polygon(
             cut_poly, spec.count, spec.edge_margin_mm, spec.radius_mm
         )
-        notes.append(
-            f"cut outline polygon area={cut_poly.area:.1f} mm² "
-            f"(not AABB rectangle)"
-        )
+        notes.append(f"cut outline area={cut_poly.area:.1f} mm²")
     else:
         centers = _pin_centers_in_bounds(
             umin, umax, vmin, vmax, spec.count, spec.edge_margin_mm
         )
-        notes.append("cut outline polygon failed; using AABB pin layout")
+        notes.append("polygon layout failed; using AABB pin layout")
 
     if not centers:
         return PinApplyResult(parts, 0, False, "none", ["cut face too small for pins"])
@@ -424,20 +497,39 @@ def apply_mating_pins(
     used_remesh = False
     method = "wafer"
     thickness = max(1.2, spec.length_mm * 0.35)
-    wafer_margin = 0.35
-    wafer_kind = "outline"
+    wafer_kind = "extruded-cap"
     try:
-        if cut_poly is None:
-            raise ValueError("no polygon")
-        wafer = _make_outline_wafer(
-            cut_poly, origin, n, u, v, thickness=thickness, margin=wafer_margin
+        wafer = _make_extruded_cut_wafer(
+            wafer_src, wafer_mask, origin, n, u, v, thickness=thickness
+        )
+        notes.append(
+            f"wafer from {wafer_src_name} cut triangulation "
+            f"({int(np.count_nonzero(wafer_mask))} faces)"
         )
     except Exception as exc:
-        wafer_kind = "box"
-        notes.append(f"outline wafer failed ({exc}); falling back to AABB box")
-        wafer = _make_box_wafer(
-            origin, n, u, v, umin, umax, vmin, vmax, thickness=thickness, margin=0.5
-        )
+        wafer_kind = "outline"
+        notes.append(f"extruded-cap wafer failed ({exc}); trying outline")
+        try:
+            if cut_poly is None:
+                raise ValueError("no polygon")
+            wafer = _make_outline_wafer(
+                cut_poly, origin, n, u, v, thickness=thickness, margin=0.2
+            )
+        except Exception as exc2:
+            wafer_kind = "box"
+            notes.append(f"outline wafer failed ({exc2}); AABB box last resort")
+            wafer = _make_box_wafer(
+                origin,
+                n,
+                u,
+                v,
+                umin,
+                umax,
+                vmin,
+                vmax,
+                thickness=thickness,
+                margin=0.5,
+            )
     if not getattr(wafer, "is_volume", False):
         wafer = _ensure_volume_local(wafer, pitch=min(0.4, remesh_pitch_mm))
         notes.append("wafer local remesh for volume")
@@ -459,22 +551,17 @@ def apply_mating_pins(
 
     female_out = female
     if method != "male_only":
-        if np.any(f_mask):
-            keep = ~f_mask
-            try:
-                female_body = female.submesh([np.where(keep)[0]], append=True)
-            except Exception:
-                female_body = female.copy()
-                female_body.update_faces(keep)
-                female_body.remove_unreferenced_vertices()
-        else:
-            female_body = female.copy()
+        # Always strip the female planar cap before attaching the holed wafer.
+        # Leaving it in place is what produced the floating rectangle plate.
+        female_body = _strip_faces(female, f_mask)
+        if not np.any(f_mask):
+            notes.append("warning: no female cap stripped — rim may not seal")
 
         female_out = trimesh.util.concatenate([female_body, holed])
         female_out.merge_vertices()
         notes.append(
-            f"female: {wafer_kind} cut-cap wafer with {len(pin_meshes)} sockets "
-            "(body unremeshed)"
+            f"female: {wafer_kind} wafer + {len(pin_meshes)} sockets "
+            "(body unremeshed, cap replaced)"
         )
     elif allow_remesh:
         used_remesh = True
