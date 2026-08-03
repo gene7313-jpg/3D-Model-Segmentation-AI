@@ -184,6 +184,8 @@ Scale-to-mm stays in Phase C (`generate-from-image`). Contoured polylines remain
 
 **Exit criteria:** Photo → printable multi-part organic kit without leaving the two-repo workflow.
 
+**Done (2026-08-02 Mac Studio):** `cut-organic data/raw/organic/shoe_cli_full --force-split` → 2 parts (~42×60×51 and ~53×36×60 mm), All fit: True. Mesh still not fully watertight after repair (TRELLIS.mac holes); plane slice+cap succeeded anyway.
+
 ## Dependency boundary
 
 | Package | In this repo’s default venv? |
