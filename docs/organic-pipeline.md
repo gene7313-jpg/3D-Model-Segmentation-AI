@@ -24,10 +24,12 @@ Apply the printability nodes to **existing** organic projects under `data/raw/or
 
 | Node | Module / CLI | Purpose |
 |------|----------------|---------|
-| **repair** | `repair.py` via `cut-organic --repair-mode` | Close TRELLIS holes; voxel remesh if needed |
+| **repair** | `repair.py` via `--repair-mode basic\|voxel` | **basic** (default) preserves detail; **voxel** forces watertight but is lossy/blocky |
 | **split** | `organic_cut.py` | Longest-axis mid-plane until parts fit (or `--force-split`) |
-| **pins** | `pins.py` via `--with-pins` | Male pin + female socket on mating cut faces |
+| **pins** | `pins.py` via `--with-pins` | Male pin + female socket on mating cut faces (run on basic-cut meshes) |
 | **batch** | `process-organic` / `process-organic-batch` | Run nodes on one or many existing slugs |
+
+**Quality note:** Do **not** use `--repair-mode auto/voxel` for display/print detail. `auto` now equals `basic`. Coarse voxel remesh (~2 mm pitch) turns shoes into LEGO; only use `--repair-mode voxel --voxel-resolution 160+` when you explicitly need a watertight shell.
 
 ## Existing project prerequisites
 
@@ -60,8 +62,7 @@ pip install -e .
 # Repair + split + pins on an existing slug
 segmentation-ai process-organic data/raw/organic/shoe_cli_full \
   --force-split \
-  --repair-mode auto \
-  --voxel-resolution 96 \
+  --repair-mode basic \
   --with-pins
 ```
 
@@ -69,7 +70,7 @@ Equivalent lower-level command:
 
 ```bash
 segmentation-ai cut-organic data/raw/organic/shoe_cli_full \
-  --force-split --repair-mode auto --with-pins
+  --force-split --repair-mode basic --with-pins
 ```
 
 ## Batch all organic slugs

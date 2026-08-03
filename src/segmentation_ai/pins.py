@@ -133,8 +133,10 @@ def add_mating_pins(
     pin_r = spec.diameter_mm / 2.0
     hole_r = (spec.diameter_mm + spec.clearance_mm) / 2.0
     pin_h = spec.length_mm
-    hole_h = spec.length_mm + 1.5
-    embed = 0.35 * pin_h  # fraction of pin inside male
+    hole_h = spec.length_mm + 2.0
+    # Keep a short root in the male; most of the pin should stick out past the cut.
+    protrude = 0.65 * pin_h
+    embed = pin_h - protrude
 
     male_out = male
     female_out = female
@@ -142,8 +144,8 @@ def add_mating_pins(
 
     for off in offsets:
         pos = origin + major * float(off)
-        # Pin axis toward female (−n). Center so embed length sits in male.
-        pin_center = pos - n * (pin_h * 0.5 - embed)
+        # Pin axis toward female (−n). Center so `embed` sits in male, rest protrudes.
+        pin_center = pos - n * (embed - pin_h * 0.5)
         pin = _oriented_cylinder(
             position=pin_center, axis=-n, radius=pin_r, height=pin_h
         )
@@ -153,8 +155,8 @@ def add_mating_pins(
             notes.append(f"pin union failed @ {off:.2f}: {exc}")
             continue
 
-        # Socket deeper into female (−n from plane)
-        hole_center = pos - n * (hole_h * 0.45)
+        # Socket opens on the cut face and goes into the female (−n).
+        hole_center = pos - n * (hole_h * 0.5 - 0.5)
         hole = _oriented_cylinder(
             position=hole_center, axis=-n, radius=hole_r, height=hole_h
         )

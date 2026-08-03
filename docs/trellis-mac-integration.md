@@ -188,13 +188,13 @@ Scale-to-mm stays in Phase C (`generate-from-image`). Contoured polylines remain
 
 ### Stronger repair (post–Phase D)
 
-`cut-organic` supports `--repair-mode auto|basic|voxel` (default **auto**):
+`cut-organic` supports `--repair-mode basic|voxel|auto` (default **basic**):
 
-1. **basic** — normals / fill_holes / cleanup / largest component  
-2. **voxel** — force watertight via voxelize → fill → marching cubes (`scikit-image`)  
-3. **auto** — basic, then voxel if still open  
+1. **basic** (recommended) — normals / fill_holes / cleanup; keeps TRELLIS detail; plane cuts OK if open  
+2. **voxel** — watertight remesh (lossy/blocky); use `--voxel-resolution 160+` if you must  
+3. **auto** — same as basic (no longer auto-voxels; that destroyed organic detail)  
 
-Writes `source_repaired.stl` before cutting. Tune with `--voxel-resolution 64` or `--pitch-mm`.
+Writes `source_repaired.stl` before cutting.
 
 ### Apply to existing models + pins
 

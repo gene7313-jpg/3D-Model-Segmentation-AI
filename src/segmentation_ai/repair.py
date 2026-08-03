@@ -65,13 +65,24 @@ def _basic_cleanup(mesh: trimesh.Trimesh, notes: list[str]) -> trimesh.Trimesh:
     except Exception as exc:
         notes.append(f"merge_vertices skipped: {exc}")
 
-    # Keep largest connected component (drops loose scraps)
+    # Drop tiny scraps only when one dominant component owns most faces.
+    # TRELLIS meshes can fragment into hundreds of scraps; never discard the
+    # majority of the model just to pick a "largest" island.
     try:
         parts = m.split(only_watertight=False)
         if len(parts) > 1:
             parts = sorted(parts, key=lambda p: len(p.faces), reverse=True)
-            m = parts[0]
-            notes.append(f"keep_largest_of_{len(parts)}_components")
+            total = sum(len(p.faces) for p in parts) or 1
+            frac = len(parts[0].faces) / total
+            if frac >= 0.85:
+                m = parts[0]
+                notes.append(
+                    f"keep_largest_of_{len(parts)}_components frac={frac:.2f}"
+                )
+            else:
+                notes.append(
+                    f"keep_largest skipped ({len(parts)} comps, largest_frac={frac:.2f})"
+                )
     except Exception as exc:
         notes.append(f"split skipped: {exc}")
 
@@ -135,9 +146,10 @@ def repair_mesh(
     Repair for print/cut readiness.
 
     Modes:
-      - basic: normals / hole fill / cleanup (may stay open on TRELLIS meshes)
-      - voxel: always voxel-remesh to a watertight shell (needs scikit-image)
-      - auto:  basic first; if still open, voxel-remesh
+      - basic: normals / hole fill / cleanup (may stay open; preserves detail)
+      - voxel: always voxel-remesh to a watertight shell (lossy; needs scikit-image)
+      - auto:  same as basic — plane cuts work without watertight. Use voxel only
+               when explicitly requested (--repair-mode voxel).
     """
     notes: list[str] = []
     before_w = bool(mesh.is_watertight)
@@ -147,7 +159,13 @@ def repair_mesh(
     m = _basic_cleanup(mesh, notes)
     notes.append(f"mode_requested={mode}")
 
-    need_voxel = mode == "voxel" or (mode == "auto" and not bool(m.is_watertight))
+    # auto no longer voxel-remeshes: coarse remesh destroyed organic detail.
+    need_voxel = mode == "voxel"
+    if mode == "auto" and not bool(m.is_watertight):
+        notes.append(
+            "auto keeps basic mesh (open OK for plane_cut); "
+            "pass --repair-mode voxel only if you accept detail loss"
+        )
     if need_voxel:
         try:
             m, used_pitch = _voxel_watertight(

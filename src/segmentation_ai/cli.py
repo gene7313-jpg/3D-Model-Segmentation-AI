@@ -136,9 +136,9 @@ def _apply_organic_defaults(args: argparse.Namespace) -> None:
     if getattr(args, "max_splits", None) is None:
         args.max_splits = int(org.get("max_splits", 3))
     if getattr(args, "repair_mode", None) is None:
-        args.repair_mode = str(org.get("repair_mode", "auto"))
-    if getattr(args, "voxel_resolution", None) is None:
-        args.voxel_resolution = int(org.get("voxel_resolution", 64))
+        args.repair_mode = str(org.get("repair_mode", "basic"))
+        if getattr(args, "voxel_resolution", None) is None:
+            args.voxel_resolution = int(org.get("voxel_resolution", 160))
     if not hasattr(args, "with_pins") or args.with_pins is False:
         # only auto-enable from config if user didn't pass the flag; flag is store_true
         if not args.with_pins:

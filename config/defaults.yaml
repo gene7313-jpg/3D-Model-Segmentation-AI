@@ -22,11 +22,12 @@ trellis:
 organic_cut:
   max_splits: 3
   strategy: longest_axis_midplane
-  repair_mode: auto          # basic | voxel | auto
-  voxel_resolution: 64       # cells along longest axis for watertight remesh
+  # basic = preserve TRELLIS detail (recommended). voxel = watertight but blocky.
+  repair_mode: basic
+  voxel_resolution: 160      # only used with --repair-mode voxel (higher = less blocky)
   with_pins: false           # default off; enable via --with-pins
   pins:
-    diameter_mm: 3.0
-    clearance_mm: 0.2
-    length_mm: 6.0
+    diameter_mm: 4.0         # visible on cut faces; was 3.0
+    clearance_mm: 0.25
+    length_mm: 8.0
     count: 2
