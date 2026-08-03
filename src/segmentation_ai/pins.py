@@ -39,6 +39,52 @@ def _boolean(a: trimesh.Trimesh, b: trimesh.Trimesh, op: str) -> trimesh.Trimesh
     return out
 
 
+def _ensure_volume(
+    mesh: trimesh.Trimesh,
+    *,
+    pitch_mm: float,
+    notes: list[str],
+    label: str,
+) -> trimesh.Trimesh:
+    """
+    Manifold boolean requires watertight volumes. Prefer light repair; if still
+    open, do a *fine* voxel remesh of this part only (not the whole pre-cut mesh).
+    """
+    m = trimesh.Trimesh(
+        vertices=np.asarray(mesh.vertices),
+        faces=np.asarray(mesh.faces),
+        process=True,
+    )
+    try:
+        trimesh.repair.fix_normals(m)
+        trimesh.repair.fill_holes(m)
+    except Exception:
+        pass
+
+    if bool(getattr(m, "is_volume", False)) or (
+        m.is_watertight and m.is_winding_consistent
+    ):
+        notes.append(f"{label}: already_volume faces={len(m.faces)}")
+        return m
+
+    longest = float(np.max(m.extents))
+    pitch = max(float(pitch_mm), longest / 200.0)
+    centroid = np.asarray(m.centroid, dtype=float)
+    try:
+        vg = m.voxelized(pitch=pitch).fill()
+        solid = vg.marching_cubes.copy()
+        solid.apply_transform(vg.transform)
+        solid.apply_translation(centroid - np.asarray(solid.centroid, dtype=float))
+        notes.append(
+            f"{label}: fine_voxel_for_pins pitch_mm={pitch:.3f} "
+            f"faces {len(m.faces)}→{len(solid.faces)} watertight={solid.is_watertight}"
+        )
+        return solid
+    except Exception as exc:
+        notes.append(f"{label}: volume_prepare_failed ({exc})")
+        return m
+
+
 def _basis_from_normal(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     n = normal / (np.linalg.norm(normal) + 1e-12)
     up = np.array([0.0, 0.0, 1.0])
@@ -54,7 +100,6 @@ def _basis_from_normal(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 def _cut_face_centroid(mesh: trimesh.Trimesh, inward_normal: np.ndarray) -> np.ndarray:
     """Centroid of faces whose outward normal opposes inward_normal (cut cap)."""
     n = inward_normal / (np.linalg.norm(inward_normal) + 1e-12)
-    # Cap faces point outward from the part = opposite of "into the part"
     outward = -n
     align = mesh.face_normals @ outward
     mask = align > 0.85
@@ -72,7 +117,7 @@ def _oriented_cylinder(
     height: float,
 ) -> trimesh.Trimesh:
     """Cylinder centered at ``position``, +Z aligned to ``axis``."""
-    cyl = trimesh.creation.cylinder(radius=radius, height=height, sections=32)
+    cyl = trimesh.creation.cylinder(radius=radius, height=height, sections=48)
     z = np.array([0.0, 0.0, 1.0])
     a = axis / (np.linalg.norm(axis) + 1e-12)
     if abs(np.dot(z, a)) < 0.999:
@@ -108,15 +153,18 @@ def add_mating_pins(
     n = n / (np.linalg.norm(n) + 1e-12)
     origin = np.asarray(cut_origin, dtype=float)
 
-    # Confirm male is on +n side of plane; swap labeling if needed
     male_side = np.dot(np.asarray(male.centroid) - origin, n)
     female_side = np.dot(np.asarray(female.centroid) - origin, n)
     if male_side < female_side:
         male, female = female, male
         notes.append("swapped_male_female_by_plane_side")
 
+    # Fine pitch for pin booleans only (~pin radius / 2, clamped)
+    pin_pitch = float(np.clip(spec.diameter_mm / 6.0, 0.25, 0.6))
+    male = _ensure_volume(male, pitch_mm=pin_pitch, notes=notes, label="male")
+    female = _ensure_volume(female, pitch_mm=pin_pitch, notes=notes, label="female")
+
     major, _ = _basis_from_normal(n)
-    # Refine origin using male cut-cap centroid when available
     cap_c = _cut_face_centroid(male, inward_normal=-n)
     origin = 0.5 * (origin + cap_c)
 
@@ -134,7 +182,6 @@ def add_mating_pins(
     hole_r = (spec.diameter_mm + spec.clearance_mm) / 2.0
     pin_h = spec.length_mm
     hole_h = spec.length_mm + 2.0
-    # Keep a short root in the male; most of the pin should stick out past the cut.
     protrude = 0.65 * pin_h
     embed = pin_h - protrude
 
@@ -144,7 +191,6 @@ def add_mating_pins(
 
     for off in offsets:
         pos = origin + major * float(off)
-        # Pin axis toward female (−n). Center so `embed` sits in male, rest protrudes.
         pin_center = pos - n * (embed - pin_h * 0.5)
         pin = _oriented_cylinder(
             position=pin_center, axis=-n, radius=pin_r, height=pin_h
@@ -152,10 +198,14 @@ def add_mating_pins(
         try:
             male_out = _boolean(male_out, pin, "union")
         except Exception as exc:
-            notes.append(f"pin union failed @ {off:.2f}: {exc}")
-            continue
+            # Fallback: glue pin geometry (overlap) so pins are still printable
+            try:
+                male_out = trimesh.util.concatenate([male_out, pin])
+                notes.append(f"pin union fallback concatenate @ {off:.2f}: {exc}")
+            except Exception as exc2:
+                notes.append(f"pin union failed @ {off:.2f}: {exc2}")
+                continue
 
-        # Socket opens on the cut face and goes into the female (−n).
         hole_center = pos - n * (hole_h * 0.5 - 0.5)
         hole = _oriented_cylinder(
             position=hole_center, axis=-n, radius=hole_r, height=hole_h
