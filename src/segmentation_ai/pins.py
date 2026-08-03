@@ -354,6 +354,15 @@ def _resolve_layout(
         notes.append("cut face too small for pins")
         return None
 
+    # Polygon inset can land in gaps (shoe opening / missing cap tris).
+    # Snap every center onto a real female (or layout) cut-cap triangle.
+    snap_mesh = female if np.any(f_mask) else layout_mesh
+    snap_mask = f_mask if np.any(f_mask) else layout_mask
+    centers, snap_notes = _snap_centers_onto_cap(
+        snap_mesh, snap_mask, origin, u, v, centers
+    )
+    notes.extend(snap_notes)
+
     return _PinLayout(
         male_index=male_index,
         female_index=female_index,
@@ -366,6 +375,48 @@ def _resolve_layout(
         m_mask=m_mask,
         notes=notes,
     )
+
+
+def _snap_centers_onto_cap(
+    mesh: Trimesh,
+    face_mask: np.ndarray,
+    origin: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    centers: list[tuple[float, float]],
+) -> tuple[list[tuple[float, float]], list[str]]:
+    """Ensure each pin UV lies on an actual cut-cap triangle (not empty outline)."""
+    notes: list[str] = []
+    if not np.any(face_mask):
+        return centers, ["snap skipped: no cut-cap faces"]
+
+    cap_ids = np.where(face_mask)[0]
+    cap_centroids_uv: list[tuple[float, float]] = []
+    for i in cap_ids:
+        cu, cv = _uv(mesh.triangles_center[i], origin, u, v)
+        cap_centroids_uv.append((cu, cv))
+
+    snapped: list[tuple[float, float]] = []
+    for pu, pv in centers:
+        on_cap = False
+        for i in cap_ids:
+            tri = mesh.vertices[mesh.faces[i]]
+            tri_uv = np.array([_uv(p, origin, u, v) for p in tri], dtype=float)
+            if _point_in_triangle_2d(pu, pv, tri_uv):
+                snapped.append((pu, pv))
+                on_cap = True
+                break
+        if on_cap:
+            continue
+        # Nearest cut-face centroid
+        dists = [(cu - pu) ** 2 + (cv - pv) ** 2 for cu, cv in cap_centroids_uv]
+        j = int(np.argmin(dists))
+        spu, spv = cap_centroids_uv[j]
+        notes.append(
+            f"snapped pin center ({pu:.1f},{pv:.1f})→({spu:.1f},{spv:.1f}) onto cut-cap"
+        )
+        snapped.append((spu, spv))
+    return snapped, notes
 
 
 # ---------------------------------------------------------------------------
@@ -452,10 +503,14 @@ def _refine_cut_near_hole(
     """
     pu, pv = center_uv
     out = mesh.copy()
+    nrm = plane_normal / (np.linalg.norm(plane_normal) + 1e-12)
     for _ in range(max_rounds):
         f_mask = _cut_face_mask(
             out, plane_origin, plane_normal, cos_thresh=0.80, plane_tol_mm=0.75
         )
+        # Also consider near-plane faces with odd winding (needed for stubborn hole[1])
+        band = np.abs((out.triangles_center - plane_origin) @ nrm) <= 1.5
+        f_mask = f_mask | band
         split_ids = [
             int(i)
             for i in np.where(f_mask)[0]
@@ -651,7 +706,106 @@ def _punch_one_socket(
         if n_removed > 0:
             return punched, n_removed
 
+    # Last resort: snap to nearest near-plane face and carve a UV disk there.
+    forced = _force_carve_uv_disk(
+        mesh,
+        plane_origin=plane_origin,
+        plane_normal=plane_normal,
+        u=u,
+        v=v,
+        center_uv=center_uv,
+        hole_radius=hole_radius,
+    )
+    if forced[1] > 0:
+        return forced
+
     return best, best_removed
+
+
+def _force_carve_uv_disk(
+    mesh: Trimesh,
+    *,
+    plane_origin: np.ndarray,
+    plane_normal: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    center_uv: tuple[float, float],
+    hole_radius: float,
+) -> tuple[Trimesh, int]:
+    """
+    Guaranteed carve attempt: move to nearest near-plane face centroid if needed,
+    refine, delete every small face whose centroid lies in the UV disk.
+    """
+    nrm = plane_normal / (np.linalg.norm(plane_normal) + 1e-12)
+    dist = np.abs((mesh.triangles_center - plane_origin) @ nrm)
+    band_ids = np.where(dist <= 1.5)[0]
+    if len(band_ids) == 0:
+        return mesh, 0
+
+    pu, pv = center_uv
+    # Prefer a band face that contains the point; else nearest band centroid.
+    target = (pu, pv)
+    containing = None
+    for i in band_ids:
+        tri_uv = np.array(
+            [_uv(p, plane_origin, u, v) for p in mesh.vertices[mesh.faces[i]]],
+            dtype=float,
+        )
+        if _point_in_triangle_2d(pu, pv, tri_uv):
+            containing = int(i)
+            break
+    if containing is None:
+        best_i = int(
+            min(
+                band_ids,
+                key=lambda i: (
+                    (_uv(mesh.triangles_center[i], plane_origin, u, v)[0] - pu) ** 2
+                    + (_uv(mesh.triangles_center[i], plane_origin, u, v)[1] - pv) ** 2
+                ),
+            )
+        )
+        target = _uv(mesh.triangles_center[best_i], plane_origin, u, v)
+
+    refined = _refine_cut_near_hole(
+        mesh,
+        plane_origin=plane_origin,
+        plane_normal=plane_normal,
+        u=u,
+        v=v,
+        center_uv=target,
+        hole_radius=hole_radius * 1.6,
+        max_face_area=0.1,
+        max_rounds=14,
+    )
+    dist2 = np.abs((refined.triangles_center - plane_origin) @ nrm)
+    r_hit = hole_radius * 1.05
+    tpu, tpv = target
+    remove = np.zeros(len(refined.faces), dtype=bool)
+    for i in range(len(refined.faces)):
+        if dist2[i] > 1.5:
+            continue
+        if _face_intersects_circle(
+            refined, i, plane_origin, u, v, tpu, tpv, r_hit
+        ):
+            remove[i] = True
+            continue
+        tri_uv = np.array(
+            [_uv(p, plane_origin, u, v) for p in refined.vertices[refined.faces[i]]],
+            dtype=float,
+        )
+        if _point_in_triangle_2d(tpu, tpv, tri_uv):
+            remove[i] = True
+    n_removed = int(np.count_nonzero(remove))
+    if n_removed == 0:
+        return mesh, 0
+    keep = ~remove
+    try:
+        out = refined.submesh([np.where(keep)[0]], append=True)
+    except Exception:
+        out = refined.copy()
+        out.update_faces(keep)
+        out.remove_unreferenced_vertices()
+    return out, n_removed
 
 
 def punch_female_sockets_stepwise(
@@ -758,6 +912,14 @@ def apply_mating_pins(
     out = list(parts)
     male = out[layout.male_index].copy()
     female = out[layout.female_index].copy()
+
+    # Re-snap onto the live female cut cap (outline gaps / shoe openings).
+    if apply_holes and np.any(layout.f_mask):
+        layout.centers_uv, snap_notes = _snap_centers_onto_cap(
+            female, layout.f_mask, layout.origin, layout.u, layout.v, layout.centers_uv
+        )
+        notes.extend(snap_notes)
+
     pins_applied = 0
     used_remesh = False
     method = "none"
