@@ -185,8 +185,8 @@ def cut_organic_project(
         )
     if with_pins and not pin_remesh:
         print(
-            "Pins: quality-preserving mode (male concatenate + female cut-cap wafer). "
-            "Body is never remeshed. Use --pin-remesh only as a lossy socket fallback."
+            "Pins: quality-preserving mode (male concatenate + female cut-cap punch). "
+            "No wafer plate, no remesh. Use --pin-remesh only as a lossy fallback."
         )
 
     quality_reports: list[QualityReport] = []

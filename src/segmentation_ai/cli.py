@@ -367,7 +367,7 @@ def main() -> None:
     p6.add_argument(
         "--with-pins",
         action="store_true",
-        help="Add mating pins (male concatenate + female cut-cap wafer; no body remesh)",
+        help="Add mating pins (male concatenate + female cut-cap hole punch; no remesh)",
     )
     p6.add_argument(
         "--pin-remesh",

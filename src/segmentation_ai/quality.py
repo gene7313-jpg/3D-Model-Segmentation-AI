@@ -118,8 +118,9 @@ def check_pin_quality(
     used_remesh: bool,
     allow_remesh: bool,
     min_face_keep_ratio: float = 0.85,
+    max_extent_growth: float = 1.15,
 ) -> QualityReport:
-    """Gate after pins — detail must not collapse; remesh only if allowed."""
+    """Gate after pins — detail must not collapse; no extent blow-up / remesh."""
     checks: list[QualityCheck] = []
     _check(
         "pins_applied",
@@ -136,14 +137,22 @@ def check_pin_quality(
         checks,
     )
     for i, (before, after) in enumerate(zip(parts_before, parts_after)):
-        # Male may gain faces from concatenated pins; female should not collapse.
         ratio = len(after.faces) / max(len(before.faces), 1)
-        # Allow growth; only fail hard collapse
         ok = ratio >= min_face_keep_ratio or len(after.faces) > len(before.faces)
         _check(
             f"part[{i}]_pin_face_keep",
             ok,
             f"faces {len(before.faces)}→{len(after.faces)} ratio={ratio:.2f}",
+            checks,
+        )
+        be = np.asarray(before.extents, dtype=float)
+        ae = np.asarray(after.extents, dtype=float)
+        # Pins may add length; reject wafer/remesh slabs that balloon XY
+        extent_ok = bool(np.all(ae <= be * max_extent_growth + 12.0))
+        _check(
+            f"part[{i}]_pin_extent",
+            extent_ok,
+            f"extents {np.round(be, 2)}→{np.round(ae, 2)}",
             checks,
         )
     ok = all(c.ok for c in checks)

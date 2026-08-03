@@ -105,8 +105,10 @@ Skips folders that lack a print STL. Continues on error unless `--fail-fast`. Qu
 | Side | Method | Remesh? |
 |------|--------|---------|
 | Male | High-res cylinders concatenated on cut face | Never |
-| Female | Holes punched in a thin cut-cap *wafer*; body triangles kept | Never (default) |
+| Female | Circles removed from existing cut-cap triangles (`cap_punch`) | Never (default) |
 | Fallback | Whole female remesh + boolean | Only with `--pin-remesh` |
+
+Do **not** expect a separate wafer plate on the female — that path was removed because it produced floating/jagged slabs.
 
 ## Quality gates
 
