@@ -126,6 +126,7 @@ def _organic_cut_kwargs(args: argparse.Namespace) -> dict:
         voxel_resolution=args.voxel_resolution,
         pitch_mm=args.pitch_mm,
         with_pins=args.with_pins,
+        with_pin_holes=getattr(args, "with_pin_holes", False),
         pin_remesh=getattr(args, "pin_remesh", False),
     )
 
@@ -367,7 +368,12 @@ def main() -> None:
     p6.add_argument(
         "--with-pins",
         action="store_true",
-        help="Add mating pins (male concatenate + female cut-cap hole punch; no remesh)",
+        help="Add FROZEN male mating pins only (concatenate; no female holes)",
+    )
+    p6.add_argument(
+        "--with-pin-holes",
+        action="store_true",
+        help="Add female sockets stepwise (one hole at a time; separate from --with-pins)",
     )
     p6.add_argument(
         "--pin-remesh",
@@ -389,7 +395,12 @@ def main() -> None:
         )
         p.add_argument("--voxel-resolution", type=int, default=None)
         p.add_argument("--pitch-mm", type=float, default=None)
-        p.add_argument("--with-pins", action="store_true")
+        p.add_argument("--with-pins", action="store_true", help="FROZEN male pins only")
+        p.add_argument(
+            "--with-pin-holes",
+            action="store_true",
+            help="Female sockets stepwise (separate from male pins)",
+        )
         p.add_argument(
             "--pin-remesh",
             action="store_true",

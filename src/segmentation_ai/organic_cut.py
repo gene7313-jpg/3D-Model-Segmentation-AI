@@ -162,6 +162,7 @@ def cut_organic_project(
     voxel_resolution: int = 160,
     pitch_mm: float | None = None,
     with_pins: bool = False,
+    with_pin_holes: bool = False,
     pin_remesh: bool = False,
     pin_spec: PinSpec | None = None,
     enforce_quality: bool = True,
@@ -183,10 +184,10 @@ def cut_organic_project(
             "WARNING: --repair-mode voxel remeshes the whole model and will look blocky. "
             "Prefer --repair-mode basic for organic detail."
         )
-    if with_pins and not pin_remesh:
+    if with_pins or with_pin_holes:
         print(
-            "Pins: quality-preserving mode (male concatenate + female cut-cap punch). "
-            "No wafer plate, no remesh. Use --pin-remesh only as a lossy fallback."
+            "Pins: male path is FROZEN (concatenate only). "
+            "Female holes are a separate stepwise pass (--with-pin-holes)."
         )
 
     quality_reports: list[QualityReport] = []
@@ -243,45 +244,75 @@ def cut_organic_project(
     pin_notes: list[str] = []
     pin_method = "none"
     pin_used_remesh = False
-    if with_pins:
+    if with_pins or with_pin_holes:
         if len(parts) == 2 and cut_origin is not None and cut_normal is not None:
             spec = pin_spec or _pin_spec_from_config(defaults)
             print(
                 f"Pins: diameter={spec.diameter_mm}mm clearance={spec.clearance_mm}mm "
-                f"length={spec.length_mm}mm count={spec.count} pin_remesh={pin_remesh}"
+                f"length={spec.length_mm}mm count={spec.count} "
+                f"male={with_pins} holes={with_pin_holes} pin_remesh={pin_remesh}"
             )
             parts_before = [p.copy() for p in parts]
-            male, female, preport = add_mating_pins(
-                parts[0],
-                parts[1],
-                cut_normal=cut_normal,
-                cut_origin=cut_origin,
-                spec=spec,
-                allow_remesh=pin_remesh,
-            )
-            parts = [male, female]
-            pins_applied = preport.pin_count
-            pin_notes = preport.notes
-            pin_method = preport.method
-            pin_used_remesh = preport.used_remesh
-            for note in pin_notes:
-                print(f"  pin: {note}")
-            print(f"Pins applied: {pins_applied} method={pin_method}")
+
+            # Phase A — frozen male pins (optional)
+            if with_pins:
+                male, female, preport = add_mating_pins(
+                    parts[0],
+                    parts[1],
+                    cut_normal=cut_normal,
+                    cut_origin=cut_origin,
+                    spec=spec,
+                    allow_remesh=False,
+                    apply_male=True,
+                    apply_holes=False,
+                )
+                parts = [male, female]
+                pins_applied = preport.pin_count
+                pin_notes.extend(preport.notes)
+                pin_method = preport.method
+                for note in preport.notes:
+                    print(f"  pin: {note}")
+                print(f"Pins (male) applied: {pins_applied} method={pin_method}")
+
+            # Phase B — stepwise female holes (optional, separate from male)
+            if with_pin_holes:
+                male, female, hreport = add_mating_pins(
+                    parts[0],
+                    parts[1],
+                    cut_normal=cut_normal,
+                    cut_origin=cut_origin,
+                    spec=spec,
+                    allow_remesh=pin_remesh,
+                    apply_male=False,
+                    apply_holes=True,
+                )
+                parts = [male, female]
+                pin_notes.extend(hreport.notes)
+                pin_method = hreport.method if hreport.method != "none" else pin_method
+                pin_used_remesh = hreport.used_remesh
+                for note in hreport.notes:
+                    print(f"  hole: {note}")
+                print(f"Holes method={hreport.method}")
 
             q_pins = check_pin_quality(
                 parts_before=parts_before,
                 parts_after=parts,
-                pins_applied=pins_applied,
+                pins_applied=pins_applied if with_pins else max(pins_applied, 1),
                 used_remesh=pin_used_remesh,
                 allow_remesh=pin_remesh,
             )
-            q_pins.print()
-            quality_reports.append(q_pins)
-            if not q_pins.ok:
-                print(
-                    "QUALITY FAIL (pins): remesh collapsed detail or pins not applied. "
-                    "Retry without --pin-remesh, or omit --with-pins."
-                )
+            # If male-only, require pins; if holes-only, don't fail on pins_applied==0 from male
+            if with_pins:
+                q_pins.print()
+                quality_reports.append(q_pins)
+                if not q_pins.ok:
+                    print(
+                        "QUALITY FAIL (pins): remesh collapsed detail or pins not applied."
+                    )
+            else:
+                # Holes-only: still run extent/face checks
+                q_pins.print()
+                quality_reports.append(q_pins)
         else:
             msg = (
                 f"pins skipped (need exactly 2 parts from one mid-plane cut; got {len(parts)})"
@@ -364,6 +395,7 @@ def cut_organic_project(
         "max_splits": max_splits,
         "force_split": force_split,
         "with_pins": with_pins,
+        "with_pin_holes": with_pin_holes,
         "pins_applied": pins_applied,
         "pin_method": pin_method,
         "pin_remesh": pin_remesh,

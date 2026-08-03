@@ -100,15 +100,23 @@ segmentation-ai process-organic-batch data/raw/organic \
 
 Skips folders that lack a print STL. Continues on error unless `--fail-fast`. Quality gate failure exits with code `2` (override with `--allow-quality-fail`).
 
-## Pins (quality-preserving)
+## Pins (quality-preserving, two phases)
 
-| Side | Method | Remesh? |
-|------|--------|---------|
-| Male | High-res cylinders concatenated on cut face | Never |
-| Female | Circles removed from existing cut-cap triangles (`cap_punch`) | Never (default) |
-| Fallback | Whole female remesh + boolean | Only with `--pin-remesh` |
+| Flag | Side | Method |
+|------|------|--------|
+| `--with-pins` | Male only (FROZEN) | Concatenate high-res cylinders — do not change casually |
+| `--with-pin-holes` | Female sockets | Stepwise: refine near one hole, punch, then next hole |
+| `--pin-remesh` | Female fallback | Lossy whole-part remesh + boolean |
 
-Do **not** expect a separate wafer plate on the female — that path was removed because it produced floating/jagged slabs.
+```bash
+# Phase A — pins only (verified good)
+segmentation-ai process-organic data/raw/organic/shoe_cli_full \
+  --force-split --repair-mode basic --with-pins
+
+# Phase B — add holes after pins look good
+segmentation-ai process-organic data/raw/organic/shoe_cli_full \
+  --force-split --repair-mode basic --with-pins --with-pin-holes
+```
 
 ## Quality gates
 
