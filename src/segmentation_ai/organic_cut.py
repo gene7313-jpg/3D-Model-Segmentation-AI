@@ -34,22 +34,38 @@ class OrganicCutResult:
 
 
 def _load_print_mesh(project: Path) -> tuple[trimesh.Trimesh, Path]:
+    """
+    Prefer the scaled high-res print mesh. Never use source_repaired.stl as input
+    (that file may be a lossy voxel remesh from an earlier run).
+    """
     meta_path = project / "meta.yaml"
+    skip_names = {"source_repaired.stl"}
     candidates: list[Path] = []
+
+    # 1) Scaled print meshes first (detail)
+    candidates.extend(sorted(project.glob("source_*mm.stl")))
+    # 2) meta print_stl if it isn't a repaired/voxel artifact
     if meta_path.exists():
         meta = yaml.safe_load(meta_path.read_text()) or {}
         print_stl = meta.get("print_stl")
-        if print_stl:
-            candidates.append(project / print_stl)
-    candidates.extend(sorted(project.glob("source_*mm.stl")))
+        if print_stl and print_stl not in skip_names:
+            candidates.append(project / str(print_stl))
+    # 3) raw source
     candidates.append(project / "source.stl")
 
+    seen: set[Path] = set()
     for path in candidates:
-        if path.is_file():
-            mesh = trimesh.load(path, force="mesh")
-            if isinstance(mesh, trimesh.Scene):
-                mesh = mesh.to_geometry()
-            return mesh, path
+        path = path.resolve() if path.exists() else path
+        if path in seen or not path.is_file():
+            continue
+        if path.name in skip_names:
+            continue
+        seen.add(path)
+        mesh = trimesh.load(path, force="mesh")
+        if isinstance(mesh, trimesh.Scene):
+            mesh = mesh.to_geometry()
+        print(f"Using input mesh: {path.name}  faces={len(mesh.faces)}")
+        return mesh, path
     raise FileNotFoundError(
         f"No print STL found in {project}. Run generate-from-image first."
     )
@@ -151,6 +167,7 @@ def cut_organic_project(
     mesh, source_path = _load_print_mesh(project)
     print(f"Loaded {source_path.name}  faces={len(mesh.faces)}")
 
+    faces_in = len(mesh.faces)
     mesh, repair = repair_mesh(
         mesh,
         mode=repair_mode,
@@ -163,12 +180,18 @@ def cut_organic_project(
     )
     if repair.pitch_mm is not None:
         print(f"  voxel pitch_mm={repair.pitch_mm:.4f}")
+        print("  WARNING: voxel remesh is lossy/blocky — prefer --repair-mode basic for organic detail")
     for note in repair.notes:
         print(f"  {note}")
+    if faces_in > 1000 and len(mesh.faces) < 0.25 * faces_in:
+        print(
+            f"  WARNING: face count collapsed {faces_in} → {len(mesh.faces)}; "
+            "detail was likely destroyed (voxel remesh?)"
+        )
 
     repaired_path = project / "source_repaired.stl"
     mesh.export(repaired_path)
-    print(f"Wrote {repaired_path}")
+    print(f"Wrote {repaired_path} (working copy for this cut; input was {source_path.name})")
 
     parts, cut_origin, cut_normal = split_until_fits(
         mesh,
