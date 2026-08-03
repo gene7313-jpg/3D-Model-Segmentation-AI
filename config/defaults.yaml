@@ -18,3 +18,7 @@ trellis:
   texture_size: 1024
   seed: 42
   target_longest_mm: 120.0
+# Organic cut track (Phase D) — aesthetic mid-plane seams, not mechanical pins
+organic_cut:
+  max_splits: 3
+  strategy: longest_axis_midplane

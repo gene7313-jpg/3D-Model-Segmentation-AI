@@ -164,11 +164,23 @@ Config: `config/defaults.yaml` → `trellis.*`
 
 ### Phase D — Organic cut track (aligns with roadmap Phase 4)
 
-1. Repair pass (fill small holes from skipped `cumesh`).
-2. Scale / orient to mm and printer frame.
-3. Aesthetic seam proposals (separate from mechanical pins/registers).
-4. Contoured cut + P1S validation.
-5. Dataset examples feed future organic seam model (parallel to mechanical Phase 3).
+Implemented CLI: `cut-organic`
+
+```bash
+segmentation-ai cut-organic data/raw/organic/shoe_cli_full
+# Kit-style split even when the whole mesh fits:
+segmentation-ai cut-organic data/raw/organic/shoe_cli_full --force-split
+```
+
+Behavior:
+
+1. Load `print_stl` from `meta.yaml` (else `source_*mm.stl`)
+2. Repair pass (`repair.py`: normals, fill_holes, cleanup)
+3. Aesthetic seam: mid-plane normal to longest AABB axis (not mechanical pins)
+4. Recurse until parts fit P1S or `--max-splits` budget
+5. Write `parts/part_XX.stl` + update `meta.yaml` (`cut_track: organic`)
+
+Scale-to-mm stays in Phase C (`generate-from-image`). Contoured polylines remain available via `cut.contour_cut_polyline` for later seam learning.
 
 **Exit criteria:** Photo → printable multi-part organic kit without leaving the two-repo workflow.
 

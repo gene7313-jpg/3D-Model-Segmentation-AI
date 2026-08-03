@@ -118,6 +118,19 @@ def cmd_ingest_3mf(args: argparse.Namespace) -> None:
     cmd_ingest_validate(args)
 
 
+def cmd_cut_organic(args: argparse.Namespace) -> None:
+    """Repair + aesthetic mid-plane splits for an organic project folder."""
+    from .organic_cut import cut_organic_project
+
+    result = cut_organic_project(
+        args.project_dir,
+        max_splits=args.max_splits,
+        force_split=args.force_split,
+    )
+    if not result.all_fit:
+        raise SystemExit(1)
+
+
 def cmd_generate_from_image(args: argparse.Namespace) -> None:
     """Shell out to trellis-mac and stage an organic project under data/raw/organic/."""
     from .generate_trellis import generate_from_image
@@ -255,7 +268,40 @@ def main() -> None:
     )
     p5.set_defaults(func=cmd_generate_from_image)
 
+    p6 = sub.add_parser(
+        "cut-organic",
+        help=(
+            "Phase D: repair organic print STL, mid-plane seam splits, "
+            "write parts/ + update meta.yaml"
+        ),
+    )
+    p6.add_argument(
+        "project_dir",
+        help="Path to data/raw/organic/<slug>/ (needs print STL from generate-from-image)",
+    )
+    p6.add_argument(
+        "--max-splits",
+        type=int,
+        default=None,
+        help="Max recursive mid-plane splits for oversized parts (default: config)",
+    )
+    p6.add_argument(
+        "--force-split",
+        action="store_true",
+        help="Split once along longest axis even if the whole mesh already fits P1S",
+    )
+    p6.set_defaults(func=cmd_cut_organic)
+
     args = parser.parse_args()
+
+    # Fill organic cut defaults from config when CLI omitted them
+    if getattr(args, "cmd", None) == "cut-organic" or getattr(args, "func", None) is cmd_cut_organic:
+        from .generate_trellis import load_defaults
+
+        org = (load_defaults().get("organic_cut") or {})
+        if getattr(args, "max_splits", None) is None:
+            args.max_splits = int(org.get("max_splits", 3))
+
     args.func(args)
 
 

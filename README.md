@@ -39,7 +39,13 @@ source .venv/bin/activate
 segmentation-ai generate-from-image path/to.png --slug my_figure --target-mm 120
 ```
 
-Stages `data/raw/organic/<slug>/` for Phase 4 cutting. Official TRELLIS.2 requires NVIDIA; the Mac port uses MPS/Metal.
+Stages `data/raw/organic/<slug>/` then cut for print:
+
+```bash
+segmentation-ai cut-organic data/raw/organic/my_figure --force-split
+```
+
+Official TRELLIS.2 requires NVIDIA; the Mac port uses MPS/Metal.
 
 ## Quick start (Mac Studio preferred)
 
