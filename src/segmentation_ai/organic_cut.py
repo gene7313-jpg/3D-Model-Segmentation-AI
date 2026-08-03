@@ -17,6 +17,12 @@ from .printer import (
     load_printer_profile,
     part_fits_build_plate,
 )
+from .quality import (
+    QualityReport,
+    check_cut_quality,
+    check_pin_quality,
+    check_repair_quality,
+)
 from .repair import RepairMode, repair_mesh
 
 
@@ -31,6 +37,8 @@ class OrganicCutResult:
     repaired_path: Path | None = None
     pins_applied: int = 0
     notes: list[str] = field(default_factory=list)
+    quality_ok: bool = True
+    quality_reports: list[QualityReport] = field(default_factory=list)
 
 
 def _load_print_mesh(project: Path) -> tuple[trimesh.Trimesh, Path]:
@@ -156,6 +164,7 @@ def cut_organic_project(
     with_pins: bool = False,
     pin_remesh: bool = False,
     pin_spec: PinSpec | None = None,
+    enforce_quality: bool = True,
 ) -> OrganicCutResult:
     from .generate_trellis import load_defaults
 
@@ -176,11 +185,12 @@ def cut_organic_project(
         )
     if with_pins and not pin_remesh:
         print(
-            "Pins requested without --pin-remesh: will try pin CSG on the high-res cut; "
-            "if boolean fails, pins are skipped (quality preserved)."
+            "Pins: quality-preserving mode (male concatenate + female cut-cap wafer). "
+            "Body is never remeshed. Use --pin-remesh only as a lossy socket fallback."
         )
 
-    faces_in = len(mesh.faces)
+    quality_reports: list[QualityReport] = []
+
     mesh, repair = repair_mesh(
         mesh,
         mode=repair_mode,
@@ -196,10 +206,20 @@ def cut_organic_project(
         print("  WARNING: voxel remesh is lossy/blocky — prefer --repair-mode basic for organic detail")
     for note in repair.notes:
         print(f"  {note}")
-    if faces_in > 1000 and len(mesh.faces) < 0.25 * faces_in:
+
+    used_voxel = repair.pitch_mm is not None or repair.mode == "voxel"
+    q_repair = check_repair_quality(
+        faces_before=repair.faces_before,
+        faces_after=repair.faces_after,
+        repair_mode=str(repair.mode),
+        used_voxel=used_voxel,
+    )
+    q_repair.print()
+    quality_reports.append(q_repair)
+    if not q_repair.ok:
         print(
-            f"  WARNING: face count collapsed {faces_in} → {len(mesh.faces)}; "
-            "detail was likely destroyed (voxel remesh?)"
+            "QUALITY FAIL (repair): detail likely destroyed. "
+            "Prefer --repair-mode basic (avoid voxel)."
         )
 
     repaired_path = project / "source_repaired.stl"
@@ -213,8 +233,16 @@ def cut_organic_project(
         force_split=force_split,
     )
 
+    q_cut = check_cut_quality(input_mesh=mesh, parts=parts)
+    q_cut.print()
+    quality_reports.append(q_cut)
+    if not q_cut.ok:
+        print("QUALITY FAIL (cut): part face counts collapsed vs repaired input.")
+
     pins_applied = 0
     pin_notes: list[str] = []
+    pin_method = "none"
+    pin_used_remesh = False
     if with_pins:
         if len(parts) == 2 and cut_origin is not None and cut_normal is not None:
             spec = pin_spec or _pin_spec_from_config(defaults)
@@ -222,6 +250,7 @@ def cut_organic_project(
                 f"Pins: diameter={spec.diameter_mm}mm clearance={spec.clearance_mm}mm "
                 f"length={spec.length_mm}mm count={spec.count} pin_remesh={pin_remesh}"
             )
+            parts_before = [p.copy() for p in parts]
             male, female, preport = add_mating_pins(
                 parts[0],
                 parts[1],
@@ -233,9 +262,26 @@ def cut_organic_project(
             parts = [male, female]
             pins_applied = preport.pin_count
             pin_notes = preport.notes
+            pin_method = preport.method
+            pin_used_remesh = preport.used_remesh
             for note in pin_notes:
                 print(f"  pin: {note}")
-            print(f"Pins applied: {pins_applied}")
+            print(f"Pins applied: {pins_applied} method={pin_method}")
+
+            q_pins = check_pin_quality(
+                parts_before=parts_before,
+                parts_after=parts,
+                pins_applied=pins_applied,
+                used_remesh=pin_used_remesh,
+                allow_remesh=pin_remesh,
+            )
+            q_pins.print()
+            quality_reports.append(q_pins)
+            if not q_pins.ok:
+                print(
+                    "QUALITY FAIL (pins): remesh collapsed detail or pins not applied. "
+                    "Retry without --pin-remesh, or omit --with-pins."
+                )
         else:
             msg = (
                 f"pins skipped (need exactly 2 parts from one mid-plane cut; got {len(parts)})"
@@ -265,12 +311,36 @@ def cut_organic_project(
         part_meta.append(
             {
                 "file": path.name,
+                "faces": int(len(part.faces)),
                 "extents_mm": [float(x) for x in ext.tolist()],
                 "fits_build_plate": bool(ok),
                 "message": msg,
             }
         )
-        print(f"Wrote {path}")
+        print(f"Wrote {path}  faces={len(part.faces)}")
+
+    quality_ok = all(r.ok for r in quality_reports)
+    stage_names: list[str] = []
+    for r in quality_reports:
+        first = r.checks[0].name if r.checks else ""
+        if first.startswith("face_keep") or first.startswith("no_unexpected"):
+            stage_names.append("repair")
+        elif first.startswith("parts_face") or first.startswith("part["):
+            stage_names.append("cut")
+        elif first.startswith("pins_") or "pin_face" in first:
+            stage_names.append("pins")
+        else:
+            stage_names.append("unknown")
+    quality_meta = [
+        {
+            "stage": stage_names[i] if i < len(stage_names) else f"stage_{i}",
+            "ok": r.ok,
+            "checks": [
+                {"name": c.name, "ok": c.ok, "message": c.message} for c in r.checks
+            ],
+        }
+        for i, r in enumerate(quality_reports)
+    ]
 
     meta_path = project / "meta.yaml"
     meta = yaml.safe_load(meta_path.read_text()) if meta_path.exists() else {}
@@ -295,14 +365,21 @@ def cut_organic_project(
         "force_split": force_split,
         "with_pins": with_pins,
         "pins_applied": pins_applied,
+        "pin_method": pin_method,
+        "pin_remesh": pin_remesh,
+        "pin_used_remesh": pin_used_remesh,
         "pin_notes": pin_notes,
     }
+    meta["quality"] = {"ok": quality_ok, "stages": quality_meta}
     meta["part_count"] = len(part_meta)
     meta["parts"] = part_meta
     meta["all_parts_fit_build_plate"] = bool(result.all_fit)
     meta["watertight"] = bool(repair.watertight_after)
     meta_path.write_text(yaml.safe_dump(meta, sort_keys=False))
     print(f"Updated {meta_path}")
+    print(f"Quality overall: {'PASS' if quality_ok else 'FAIL'}")
+    if not quality_ok and enforce_quality:
+        print("Quality gates failed (use --allow-quality-fail to ignore exit code).")
 
     return OrganicCutResult(
         project_dir=project,
@@ -314,6 +391,8 @@ def cut_organic_project(
         repaired_path=repaired_path,
         pins_applied=pins_applied,
         notes=pin_notes,
+        quality_ok=quality_ok,
+        quality_reports=quality_reports,
     )
 
 

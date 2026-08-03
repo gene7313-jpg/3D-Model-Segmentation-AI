@@ -70,12 +70,17 @@ git fetch origin
 git checkout feature/organic-repair-split-pins
 pip install -e .
 
-# Repair + split + pins on an existing slug
+# Repair + split + quality-preserving pins
 segmentation-ai process-organic data/raw/organic/shoe_cli_full \
   --force-split \
   --repair-mode basic \
   --with-pins
+
+# Face counts + quality ratios
+python scripts/diagnose_organic.py shoe_cli_full
 ```
+
+Do **not** use `--repair-mode voxel` for organic detail. Do **not** pass `--pin-remesh` unless the wafer socket path fails and you accept a lossy female remesh.
 
 Equivalent lower-level command:
 
@@ -89,22 +94,42 @@ segmentation-ai cut-organic data/raw/organic/shoe_cli_full \
 ```bash
 segmentation-ai process-organic-batch data/raw/organic \
   --force-split \
-  --repair-mode auto \
+  --repair-mode basic \
   --with-pins
 ```
 
-Skips folders that lack a print STL. Continues on error unless `--fail-fast`.
+Skips folders that lack a print STL. Continues on error unless `--fail-fast`. Quality gate failure exits with code `2` (override with `--allow-quality-fail`).
+
+## Pins (quality-preserving)
+
+| Side | Method | Remesh? |
+|------|--------|---------|
+| Male | High-res cylinders concatenated on cut face | Never |
+| Female | Holes punched in a thin cut-cap *wafer*; body triangles kept | Never (default) |
+| Fallback | Whole female remesh + boolean | Only with `--pin-remesh` |
+
+## Quality gates
+
+Built into `process-organic` / `cut-organic` (`src/segmentation_ai/quality.py`):
+
+| Stage | Fails when |
+|-------|------------|
+| Repair | Face keep ratio &lt; 0.70, or unexpected voxel remesh |
+| Cut | Part face sum &lt; 0.70× input, or a part &lt; 0.15× input |
+| Pins | No pins applied, remesh without `--pin-remesh`, or face collapse |
+
+Results are written to `meta.yaml` → `quality`.
 
 ## Pin defaults
 
-From `config/defaults.yaml` → `mechanical` / `organic_cut.pins`:
+From `config/defaults.yaml` → `organic_cut.pins`:
 
 | Setting | Default | Notes |
 |---------|---------|--------|
-| `pin_diameter_mm` | 3.0 | Male pin OD |
-| `pin_clearance_mm` | 0.2 | Female hole is diameter + clearance |
-| `pin_length_mm` | 6.0 | Engagement length |
-| `pin_count` | 2 | Along major axis of cut face |
+| `diameter_mm` | 4.0 | Male pin OD |
+| `clearance_mm` | 0.25 | Female hole radius += clearance |
+| `length_mm` | 8.0 | Engagement length |
+| `count` | 2 | Along major axis of cut face |
 
 ## Roadmap tie-in
 

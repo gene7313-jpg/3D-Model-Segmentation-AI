@@ -150,7 +150,11 @@ def cmd_cut_organic(args: argparse.Namespace) -> None:
     """Repair + aesthetic mid-plane splits for an organic project folder."""
     from .organic_cut import cut_organic_project
 
-    result = cut_organic_project(args.project_dir, **_organic_cut_kwargs(args))
+    kwargs = _organic_cut_kwargs(args)
+    kwargs["enforce_quality"] = not getattr(args, "allow_quality_fail", False)
+    result = cut_organic_project(args.project_dir, **kwargs)
+    if not result.quality_ok and kwargs["enforce_quality"]:
+        raise SystemExit(2)
     if not result.all_fit:
         raise SystemExit(1)
 
@@ -164,14 +168,22 @@ def cmd_process_organic_batch(args: argparse.Namespace) -> None:
     """Apply repair/split/pins to every processable slug under an organic root."""
     from .organic_cut import process_organic_batch
 
+    kwargs = _organic_cut_kwargs(args)
+    kwargs["enforce_quality"] = not getattr(args, "allow_quality_fail", False)
     results = process_organic_batch(
         args.root_dir,
         fail_fast=args.fail_fast,
-        **_organic_cut_kwargs(args),
+        **kwargs,
     )
-    failed = [r for r in results if not r.all_fit]
-    print(f"\nBatch done: {len(results)} processed, {len(failed)} with fit failures")
-    if failed:
+    quality_failed = [r for r in results if not r.quality_ok]
+    fit_failed = [r for r in results if not r.all_fit]
+    print(
+        f"\nBatch done: {len(results)} processed, "
+        f"{len(quality_failed)} quality failures, {len(fit_failed)} fit failures"
+    )
+    if quality_failed and kwargs["enforce_quality"]:
+        raise SystemExit(2)
+    if fit_failed:
         raise SystemExit(1)
 
 
@@ -355,12 +367,17 @@ def main() -> None:
     p6.add_argument(
         "--with-pins",
         action="store_true",
-        help="Add mating pins (male kept high-res; sockets need --pin-remesh if not solid)",
+        help="Add mating pins (male concatenate + female cut-cap wafer; no body remesh)",
     )
     p6.add_argument(
         "--pin-remesh",
         action="store_true",
-        help="Allow fine remesh of female part for socket booleans (can reduce quality)",
+        help="Lossy fallback: remesh female part for socket booleans (reduces quality)",
+    )
+    p6.add_argument(
+        "--allow-quality-fail",
+        action="store_true",
+        help="Do not abort when quality gates fail (still prints FAIL)",
     )
     p6.set_defaults(func=cmd_cut_organic)
 
@@ -376,7 +393,12 @@ def main() -> None:
         p.add_argument(
             "--pin-remesh",
             action="store_true",
-            help="Allow fine remesh for pin sockets (quality tradeoff)",
+            help="Lossy fallback remesh for pin sockets",
+        )
+        p.add_argument(
+            "--allow-quality-fail",
+            action="store_true",
+            help="Do not abort when quality gates fail",
         )
 
     p7 = sub.add_parser(
