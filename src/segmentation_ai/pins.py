@@ -1,8 +1,8 @@
 """Mating pin/socket features for cut-plane alignment (quality-preserving).
 
 Male pins: high-res cylinders concatenated onto the male cut face (no remesh).
-Female sockets: holes punched into a thin watertight *cut-cap wafer* that replaces
-the open cut-face region — body triangulation is never voxel-remeshed.
+Female sockets: holes punched into a thin watertight *cut-cap wafer* shaped to the
+cut-face outline (not a bounding rectangle) — body triangulation is never remeshed.
 
 Use --pin-remesh only as a last-resort whole-part remesh for boolean fallback.
 """
@@ -13,8 +13,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import trimesh
+from shapely.geometry import MultiPolygon, Point, Polygon
+from shapely.ops import unary_union
 from trimesh import Trimesh
-from trimesh.creation import cylinder
+from trimesh.creation import cylinder, extrude_polygon
 
 
 @dataclass
@@ -137,7 +139,80 @@ def _make_cylinder(
     return cyl
 
 
-def _make_cut_wafer(
+def _largest_polygon(geom) -> Polygon | None:
+    if geom is None or geom.is_empty:
+        return None
+    if isinstance(geom, Polygon):
+        return geom if not geom.is_empty else None
+    if isinstance(geom, MultiPolygon):
+        polys = [g for g in geom.geoms if not g.is_empty and g.area > 0]
+        if not polys:
+            return None
+        return max(polys, key=lambda g: g.area)
+    try:
+        return _largest_polygon(unary_union(geom))
+    except Exception:
+        return None
+
+
+def _cut_face_polygon_2d(
+    mesh: Trimesh,
+    face_mask: np.ndarray,
+    origin: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+) -> Polygon | None:
+    """Union cut-face triangles in plane UV → outline polygon (non-rectangular)."""
+    if not np.any(face_mask):
+        return None
+    polys: list[Polygon] = []
+    for face in mesh.faces[face_mask]:
+        pts = mesh.vertices[face]
+        coords = [
+            (float(np.dot(p - origin, u)), float(np.dot(p - origin, v))) for p in pts
+        ]
+        try:
+            poly = Polygon(coords)
+        except Exception:
+            continue
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        poly = _largest_polygon(poly)
+        if poly is not None and poly.area > 1e-6:
+            polys.append(poly)
+    if not polys:
+        return None
+    return _largest_polygon(unary_union(polys))
+
+
+def _make_outline_wafer(
+    polygon: Polygon,
+    origin: np.ndarray,
+    normal: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    thickness: float,
+    margin: float,
+) -> Trimesh:
+    """
+    Extrude the cut-face outline into a thin solid seated in the female (-normal).
+    Local +Z maps to world +normal; top face sits just proud of the cut plane.
+    """
+    poly = polygon.buffer(margin) if margin > 0 else polygon
+    poly = _largest_polygon(poly)
+    if poly is None:
+        raise ValueError("empty cut-face polygon after buffer")
+    solid = extrude_polygon(poly, height=thickness)
+    R = np.column_stack([u, v, normal])
+    T = np.eye(4)
+    T[:3, :3] = R
+    # z=thickness → near plane (+0.05 toward male); z=0 deep in female
+    T[:3, 3] = origin - normal * (thickness - 0.05)
+    solid.apply_transform(T)
+    return solid
+
+
+def _make_box_wafer(
     origin: np.ndarray,
     normal: np.ndarray,
     u: np.ndarray,
@@ -149,7 +224,7 @@ def _make_cut_wafer(
     thickness: float,
     margin: float,
 ) -> Trimesh:
-    """Thin box covering the cut face, mostly into the female half (-normal)."""
+    """Fallback AABB wafer if outline reconstruction fails."""
     cu = 0.5 * (umin + umax)
     cv = 0.5 * (vmin + vmax)
     wu = (umax - umin) + 2 * margin
@@ -158,11 +233,60 @@ def _make_cut_wafer(
     R = np.column_stack([u, v, normal])
     T = np.eye(4)
     T[:3, :3] = R
-    # Female is on -normal side; seat wafer just inside female.
     center = origin + u * cu + v * cv - normal * (0.5 * thickness - 0.05)
     T[:3, 3] = center
     box.apply_transform(T)
     return box
+
+
+def _pin_centers_in_polygon(
+    polygon: Polygon,
+    count: int,
+    edge_margin: float,
+    pin_radius: float,
+) -> list[tuple[float, float]]:
+    """Place pins inside an inset of the cut outline along its longer axis."""
+    inset_dist = max(edge_margin, pin_radius + 0.75)
+    inset = _largest_polygon(polygon.buffer(-inset_dist))
+    if inset is None:
+        inset = _largest_polygon(polygon.buffer(-0.5 * inset_dist))
+    if inset is None:
+        return []
+    minx, miny, maxx, maxy = inset.bounds
+    candidates = _pin_centers_in_bounds(minx, maxx, miny, maxy, count, edge_margin=0.0)
+    kept: list[tuple[float, float]] = []
+    for cu, cv in candidates:
+        if inset.contains(Point(cu, cv)):
+            kept.append((cu, cv))
+        else:
+            # Snap toward polygon representative point
+            rp = inset.representative_point()
+            mid = (0.5 * (cu + rp.x), 0.5 * (cv + rp.y))
+            if inset.contains(Point(*mid)):
+                kept.append(mid)
+    if len(kept) < count and count > 0:
+        # Fall back: spread along minimum rotated rectangle major axis
+        try:
+            mrr = inset.minimum_rotated_rectangle
+            coords = list(mrr.exterior.coords)
+            edges = [
+                (np.array(coords[i]), np.array(coords[i + 1]))
+                for i in range(len(coords) - 1)
+            ]
+            lengths = [float(np.linalg.norm(b - a)) for a, b in edges]
+            i = int(np.argmax(lengths))
+            a, b = edges[i]
+            kept = []
+            for k in range(count):
+                t = (k + 0.5) / count
+                p = a + t * (b - a)
+                pt = Point(float(p[0]), float(p[1]))
+                if not inset.contains(pt):
+                    pt = inset.representative_point()
+                kept.append((float(pt.x), float(pt.y)))
+        except Exception:
+            pass
+    return kept
 
 
 def _boolean_difference(a: Trimesh, b: Trimesh) -> Trimesh | None:
@@ -242,18 +366,34 @@ def apply_mating_pins(
 
     # Female cut faces point roughly +n (toward male / out of female)
     f_mask = _cut_face_mask(female, n, cos_thresh=0.80)
+    m_mask = _cut_face_mask(male, -n, cos_thresh=0.80)
+    outline_mesh = female
+    outline_mask = f_mask
     bounds = _cut_uv_bounds(female, origin, n, f_mask)
-    if bounds is None:
-        m_mask = _cut_face_mask(male, -n, cos_thresh=0.80)
+    if bounds is None or not np.any(f_mask):
+        outline_mesh = male
+        outline_mask = m_mask
         bounds = _cut_uv_bounds(male, origin, n, m_mask)
-        notes.append("used male cut-face bounds (female cut faces not found)")
+        notes.append("used male cut-face outline (female cut faces not found)")
     if bounds is None:
         return PinApplyResult(parts, 0, False, "none", ["no cut-face bounds"])
 
     u, v, umin, umax, vmin, vmax = bounds
-    centers = _pin_centers_in_bounds(
-        umin, umax, vmin, vmax, spec.count, spec.edge_margin_mm
-    )
+    cut_poly = _cut_face_polygon_2d(outline_mesh, outline_mask, origin, u, v)
+    if cut_poly is not None:
+        centers = _pin_centers_in_polygon(
+            cut_poly, spec.count, spec.edge_margin_mm, spec.radius_mm
+        )
+        notes.append(
+            f"cut outline polygon area={cut_poly.area:.1f} mm² "
+            f"(not AABB rectangle)"
+        )
+    else:
+        centers = _pin_centers_in_bounds(
+            umin, umax, vmin, vmax, spec.count, spec.edge_margin_mm
+        )
+        notes.append("cut outline polygon failed; using AABB pin layout")
+
     if not centers:
         return PinApplyResult(parts, 0, False, "none", ["cut face too small for pins"])
 
@@ -284,9 +424,20 @@ def apply_mating_pins(
     used_remesh = False
     method = "wafer"
     thickness = max(1.2, spec.length_mm * 0.35)
-    wafer = _make_cut_wafer(
-        origin, n, u, v, umin, umax, vmin, vmax, thickness=thickness, margin=0.5
-    )
+    wafer_margin = 0.35
+    wafer_kind = "outline"
+    try:
+        if cut_poly is None:
+            raise ValueError("no polygon")
+        wafer = _make_outline_wafer(
+            cut_poly, origin, n, u, v, thickness=thickness, margin=wafer_margin
+        )
+    except Exception as exc:
+        wafer_kind = "box"
+        notes.append(f"outline wafer failed ({exc}); falling back to AABB box")
+        wafer = _make_box_wafer(
+            origin, n, u, v, umin, umax, vmin, vmax, thickness=thickness, margin=0.5
+        )
     if not getattr(wafer, "is_volume", False):
         wafer = _ensure_volume_local(wafer, pitch=min(0.4, remesh_pitch_mm))
         notes.append("wafer local remesh for volume")
@@ -321,7 +472,10 @@ def apply_mating_pins(
 
         female_out = trimesh.util.concatenate([female_body, holed])
         female_out.merge_vertices()
-        notes.append(f"female: cut-cap wafer with {len(pin_meshes)} sockets (body unremeshed)")
+        notes.append(
+            f"female: {wafer_kind} cut-cap wafer with {len(pin_meshes)} sockets "
+            "(body unremeshed)"
+        )
     elif allow_remesh:
         used_remesh = True
         method = "boolean"
