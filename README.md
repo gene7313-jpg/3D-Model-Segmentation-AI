@@ -30,6 +30,10 @@ Override via `config/printers/*.yaml` or CLI flags. Profiles for other beds can 
 | **3** | Train a small model from your corrections |
 | **4** | Organic / aesthetic track (separate) |
 
+### Image-to-3D (Mac Studio, optional)
+
+[TRELLIS.2 via trellis-mac](docs/trellis-mac-integration.md) is planned as a **sibling upstream generator** (photo → GLB/STL), not merged into the cut engine. It feeds `data/raw/organic/` for Phase 4. Official TRELLIS.2 requires NVIDIA; the Mac port uses MPS/Metal.
+
 ## Quick start (Mac Studio preferred)
 
 ```bash
@@ -47,8 +51,14 @@ config/printers/     # Build volume profiles
 data/
   raw/               # Your original + cut examples (not committed)
   synthetic/         # Generated basic shapes
+docs/                # Design / integration plans
 src/segmentation_ai/ # Engine + CLI
 ```
+
+## Docs
+
+- [TRELLIS.2 / trellis-mac integration plan](docs/trellis-mac-integration.md)
+- [Dataset layout](data/README.md)
 
 ## Status
 
