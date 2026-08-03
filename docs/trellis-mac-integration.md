@@ -196,6 +196,13 @@ Scale-to-mm stays in Phase C (`generate-from-image`). Contoured polylines remain
 
 Writes `source_repaired.stl` before cutting. Tune with `--voxel-resolution 64` or `--pitch-mm`.
 
+### Apply to existing models + pins
+
+Branch / plan: [organic-pipeline.md](organic-pipeline.md)
+
+- `process-organic` / `process-organic-batch` — run repair → split → optional pins on existing slugs  
+- `--with-pins` — male pin + female socket on 2-part mid-plane cuts  
+
 ## Dependency boundary
 
 | Package | In this repo’s default venv? |

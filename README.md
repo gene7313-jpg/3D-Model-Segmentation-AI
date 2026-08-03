@@ -42,10 +42,12 @@ segmentation-ai generate-from-image path/to.png --slug my_figure --target-mm 120
 Stages `data/raw/organic/<slug>/` then cut for print:
 
 ```bash
-segmentation-ai cut-organic data/raw/organic/my_figure --force-split
+segmentation-ai process-organic data/raw/organic/my_figure --force-split --with-pins
+# or batch every existing slug:
+segmentation-ai process-organic-batch data/raw/organic --force-split --with-pins
 ```
 
-Official TRELLIS.2 requires NVIDIA; the Mac port uses MPS/Metal.
+Pipeline plan: [docs/organic-pipeline.md](docs/organic-pipeline.md). Official TRELLIS.2 requires NVIDIA; the Mac port uses MPS/Metal.
 
 ## Quick start (Mac Studio preferred)
 

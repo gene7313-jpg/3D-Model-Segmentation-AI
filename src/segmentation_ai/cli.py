@@ -118,19 +118,59 @@ def cmd_ingest_3mf(args: argparse.Namespace) -> None:
     cmd_ingest_validate(args)
 
 
-def cmd_cut_organic(args: argparse.Namespace) -> None:
-    """Repair + aesthetic mid-plane splits for an organic project folder."""
-    from .organic_cut import cut_organic_project
-
-    result = cut_organic_project(
-        args.project_dir,
+def _organic_cut_kwargs(args: argparse.Namespace) -> dict:
+    return dict(
         max_splits=args.max_splits,
         force_split=args.force_split,
         repair_mode=args.repair_mode,
         voxel_resolution=args.voxel_resolution,
         pitch_mm=args.pitch_mm,
+        with_pins=args.with_pins,
     )
+
+
+def _apply_organic_defaults(args: argparse.Namespace) -> None:
+    from .generate_trellis import load_defaults
+
+    org = load_defaults().get("organic_cut") or {}
+    if getattr(args, "max_splits", None) is None:
+        args.max_splits = int(org.get("max_splits", 3))
+    if getattr(args, "repair_mode", None) is None:
+        args.repair_mode = str(org.get("repair_mode", "auto"))
+    if getattr(args, "voxel_resolution", None) is None:
+        args.voxel_resolution = int(org.get("voxel_resolution", 64))
+    if not hasattr(args, "with_pins") or args.with_pins is False:
+        # only auto-enable from config if user didn't pass the flag; flag is store_true
+        if not args.with_pins:
+            args.with_pins = bool(org.get("with_pins", False))
+
+
+def cmd_cut_organic(args: argparse.Namespace) -> None:
+    """Repair + aesthetic mid-plane splits for an organic project folder."""
+    from .organic_cut import cut_organic_project
+
+    result = cut_organic_project(args.project_dir, **_organic_cut_kwargs(args))
     if not result.all_fit:
+        raise SystemExit(1)
+
+
+def cmd_process_organic(args: argparse.Namespace) -> None:
+    """Alias for cut-organic — apply repair/split/pins nodes to an existing slug."""
+    cmd_cut_organic(args)
+
+
+def cmd_process_organic_batch(args: argparse.Namespace) -> None:
+    """Apply repair/split/pins to every processable slug under an organic root."""
+    from .organic_cut import process_organic_batch
+
+    results = process_organic_batch(
+        args.root_dir,
+        fail_fast=args.fail_fast,
+        **_organic_cut_kwargs(args),
+    )
+    failed = [r for r in results if not r.all_fit]
+    print(f"\nBatch done: {len(results)} processed, {len(failed)} with fit failures")
+    if failed:
         raise SystemExit(1)
 
 
@@ -311,21 +351,61 @@ def main() -> None:
         default=None,
         help="Optional explicit voxel pitch in mm (overrides --voxel-resolution)",
     )
+    p6.add_argument(
+        "--with-pins",
+        action="store_true",
+        help="Add mating pin/socket on the cut face (2-part splits only)",
+    )
     p6.set_defaults(func=cmd_cut_organic)
+
+    def _add_organic_flags(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--max-splits", type=int, default=None)
+        p.add_argument("--force-split", action="store_true")
+        p.add_argument(
+            "--repair-mode", default=None, choices=["basic", "voxel", "auto"]
+        )
+        p.add_argument("--voxel-resolution", type=int, default=None)
+        p.add_argument("--pitch-mm", type=float, default=None)
+        p.add_argument("--with-pins", action="store_true")
+
+    p7 = sub.add_parser(
+        "process-organic",
+        help="Apply repair/split/pins pipeline nodes to an existing organic project",
+    )
+    p7.add_argument("project_dir", help="Path to data/raw/organic/<slug>/")
+    _add_organic_flags(p7)
+    p7.set_defaults(func=cmd_process_organic)
+
+    p8 = sub.add_parser(
+        "process-organic-batch",
+        help="Apply repair/split/pins to all organic slugs under a directory",
+    )
+    p8.add_argument(
+        "root_dir",
+        nargs="?",
+        default=None,
+        help="Root folder (default: data/raw/organic)",
+    )
+    p8.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Stop on first project error",
+    )
+    _add_organic_flags(p8)
+    p8.set_defaults(func=cmd_process_organic_batch)
 
     args = parser.parse_args()
 
-    # Fill organic cut defaults from config when CLI omitted them
-    if getattr(args, "func", None) is cmd_cut_organic:
-        from .generate_trellis import load_defaults
-
-        org = load_defaults().get("organic_cut") or {}
-        if getattr(args, "max_splits", None) is None:
-            args.max_splits = int(org.get("max_splits", 3))
-        if getattr(args, "repair_mode", None) is None:
-            args.repair_mode = str(org.get("repair_mode", "auto"))
-        if getattr(args, "voxel_resolution", None) is None:
-            args.voxel_resolution = int(org.get("voxel_resolution", 64))
+    if getattr(args, "func", None) in {
+        cmd_cut_organic,
+        cmd_process_organic,
+        cmd_process_organic_batch,
+    }:
+        _apply_organic_defaults(args)
+        if getattr(args, "root_dir", None) is None and args.func is cmd_process_organic_batch:
+            args.root_dir = str(
+                Path(__file__).resolve().parents[2] / "data" / "raw" / "organic"
+            )
 
     args.func(args)
 

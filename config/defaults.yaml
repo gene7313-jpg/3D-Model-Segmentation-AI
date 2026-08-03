@@ -24,3 +24,9 @@ organic_cut:
   strategy: longest_axis_midplane
   repair_mode: auto          # basic | voxel | auto
   voxel_resolution: 64       # cells along longest axis for watertight remesh
+  with_pins: false           # default off; enable via --with-pins
+  pins:
+    diameter_mm: 3.0
+    clearance_mm: 0.2
+    length_mm: 6.0
+    count: 2

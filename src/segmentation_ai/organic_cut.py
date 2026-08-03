@@ -1,8 +1,8 @@
-"""Organic / aesthetic cut track: repair, mid-seam splits, P1S validation."""
+"""Organic / aesthetic cut track: repair, mid-seam splits, pins, P1S validation."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +10,7 @@ import trimesh
 import yaml
 
 from .cut import plane_cut, validate_parts
+from .pins import PinSpec, add_mating_pins
 from .printer import (
     aabb_extents,
     default_profile_path,
@@ -28,6 +29,8 @@ class OrganicCutResult:
     watertight: bool
     fit_reports: list[str]
     repaired_path: Path | None = None
+    pins_applied: int = 0
+    notes: list[str] = field(default_factory=list)
 
 
 def _load_print_mesh(project: Path) -> tuple[trimesh.Trimesh, Path]:
@@ -71,26 +74,28 @@ def split_until_fits(
     *,
     max_splits: int,
     force_split: bool,
-) -> list[trimesh.Trimesh]:
+) -> tuple[list[trimesh.Trimesh], np.ndarray | None, np.ndarray | None]:
     """
     Recursively mid-plane split along longest axis until parts fit (or budget).
 
-    Organic heuristic only — not mechanical registers/pins.
+    Returns parts plus the first cut plane (origin, normal) when a split occurred.
     """
     ext = aabb_extents(np.asarray(mesh.vertices))
     fits, _ = part_fits_build_plate(ext, profile, allow_rotation=True)
 
     queue: list[tuple[trimesh.Trimesh, int]] = [(mesh, 0)]
     done: list[trimesh.Trimesh] = []
+    first_origin: np.ndarray | None = None
+    first_normal: np.ndarray | None = None
 
-    # Optional first split even when the whole object already fits
     if force_split and fits and max_splits >= 1:
         origin, normal = longest_axis_midplane(mesh)
         parts = plane_cut(mesh, origin=origin, normal=normal)
         if len(parts) >= 2:
+            first_origin, first_normal = origin, normal
             queue = [(p, 1) for p in parts]
         else:
-            return [mesh]
+            return [mesh], None, None
 
     while queue:
         current, depth = queue.pop(0)
@@ -105,10 +110,23 @@ def split_until_fits(
         if len(parts) < 2:
             done.append(current)
             continue
+        if first_origin is None:
+            first_origin, first_normal = origin, normal
         for p in parts:
             queue.append((p, depth + 1))
 
-    return done if done else [mesh]
+    return (done if done else [mesh]), first_origin, first_normal
+
+
+def _pin_spec_from_config(cfg: dict) -> PinSpec:
+    mech = cfg.get("mechanical") or {}
+    pins = (cfg.get("organic_cut") or {}).get("pins") or {}
+    return PinSpec(
+        diameter_mm=float(pins.get("diameter_mm", mech.get("pin_diameter_mm", 3.0))),
+        clearance_mm=float(pins.get("clearance_mm", mech.get("pin_clearance_mm", 0.2))),
+        length_mm=float(pins.get("length_mm", 6.0)),
+        count=int(pins.get("count", 2)),
+    )
 
 
 def cut_organic_project(
@@ -119,11 +137,16 @@ def cut_organic_project(
     repair_mode: RepairMode = "auto",
     voxel_resolution: int = 64,
     pitch_mm: float | None = None,
+    with_pins: bool = False,
+    pin_spec: PinSpec | None = None,
 ) -> OrganicCutResult:
+    from .generate_trellis import load_defaults
+
     project = Path(project_dir).expanduser().resolve()
     if not project.is_dir():
         raise FileNotFoundError(project)
 
+    defaults = load_defaults()
     profile = load_printer_profile(default_profile_path())
     mesh, source_path = _load_print_mesh(project)
     print(f"Loaded {source_path.name}  faces={len(mesh.faces)}")
@@ -147,12 +170,42 @@ def cut_organic_project(
     mesh.export(repaired_path)
     print(f"Wrote {repaired_path}")
 
-    parts = split_until_fits(
+    parts, cut_origin, cut_normal = split_until_fits(
         mesh,
         profile,
         max_splits=max_splits,
         force_split=force_split,
     )
+
+    pins_applied = 0
+    pin_notes: list[str] = []
+    if with_pins:
+        if len(parts) == 2 and cut_origin is not None and cut_normal is not None:
+            spec = pin_spec or _pin_spec_from_config(defaults)
+            print(
+                f"Pins: diameter={spec.diameter_mm}mm clearance={spec.clearance_mm}mm "
+                f"length={spec.length_mm}mm count={spec.count}"
+            )
+            male, female, preport = add_mating_pins(
+                parts[0],
+                parts[1],
+                cut_normal=cut_normal,
+                cut_origin=cut_origin,
+                spec=spec,
+            )
+            parts = [male, female]
+            pins_applied = preport.pin_count
+            pin_notes = preport.notes
+            for note in pin_notes:
+                print(f"  pin: {note}")
+            print(f"Pins applied: {pins_applied}")
+        else:
+            msg = (
+                f"pins skipped (need exactly 2 parts from one mid-plane cut; got {len(parts)})"
+            )
+            pin_notes.append(msg)
+            print(msg)
+
     result = validate_parts(parts, profile)
     for line in result.fit_reports:
         print(line)
@@ -203,6 +256,9 @@ def cut_organic_project(
         "strategy": "longest_axis_midplane",
         "max_splits": max_splits,
         "force_split": force_split,
+        "with_pins": with_pins,
+        "pins_applied": pins_applied,
+        "pin_notes": pin_notes,
     }
     meta["part_count"] = len(part_meta)
     meta["parts"] = part_meta
@@ -219,4 +275,49 @@ def cut_organic_project(
         watertight=bool(repair.watertight_after),
         fit_reports=result.fit_reports,
         repaired_path=repaired_path,
+        pins_applied=pins_applied,
+        notes=pin_notes,
     )
+
+
+def iter_organic_projects(root: str | Path) -> list[Path]:
+    """List slug dirs under data/raw/organic that look processable."""
+    root = Path(root).expanduser().resolve()
+    if not root.is_dir():
+        return []
+    out: list[Path] = []
+    for child in sorted(root.iterdir()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        has_stl = (
+            (child / "source.stl").is_file()
+            or any(child.glob("source_*mm.stl"))
+            or (
+                (child / "meta.yaml").is_file()
+                and "print_stl"
+                in (yaml.safe_load((child / "meta.yaml").read_text()) or {})
+            )
+        )
+        if has_stl:
+            out.append(child)
+    return out
+
+
+def process_organic_batch(
+    root: str | Path,
+    *,
+    fail_fast: bool = False,
+    **cut_kwargs,
+) -> list[OrganicCutResult]:
+    results: list[OrganicCutResult] = []
+    projects = iter_organic_projects(root)
+    print(f"Found {len(projects)} organic project(s) under {root}")
+    for project in projects:
+        print(f"\n=== {project.name} ===")
+        try:
+            results.append(cut_organic_project(project, **cut_kwargs))
+        except Exception as exc:
+            print(f"ERROR {project.name}: {exc}")
+            if fail_fast:
+                raise
+    return results
