@@ -118,6 +118,23 @@ def cmd_ingest_3mf(args: argparse.Namespace) -> None:
     cmd_ingest_validate(args)
 
 
+def cmd_generate_from_image(args: argparse.Namespace) -> None:
+    """Shell out to trellis-mac and stage an organic project under data/raw/organic/."""
+    from .generate_trellis import generate_from_image
+
+    generate_from_image(
+        image=Path(args.image),
+        slug=args.slug,
+        trellis_root=args.trellis_root,
+        pipeline_type=args.pipeline_type,
+        seed=args.seed,
+        texture_size=args.texture_size,
+        target_longest_mm=args.target_mm,
+        skip_generate=args.skip_generate,
+        existing_glb=Path(args.glb) if args.glb else None,
+    )
+
+
 def cmd_ingest_validate(args: argparse.Namespace) -> None:
     """Validate part STLs in a mechanical project folder against the build plate."""
     project = Path(args.project_dir).expanduser().resolve()
@@ -202,6 +219,41 @@ def main() -> None:
         help="Dataset track (default: mechanical)",
     )
     p4.set_defaults(func=cmd_ingest_3mf)
+
+    p5 = sub.add_parser(
+        "generate-from-image",
+        help=(
+            "Run sibling trellis-mac (subprocess) and stage data/raw/organic/<slug>/ "
+            "with scaled print STL + meta.yaml"
+        ),
+    )
+    p5.add_argument("image", help="Path to input image (PNG/JPG)")
+    p5.add_argument("--slug", default=None, help="Project folder name (default: from image name)")
+    p5.add_argument(
+        "--trellis-root",
+        default=None,
+        help="Path to trellis-mac checkout (default: config/defaults.yaml or ../trellis-mac)",
+    )
+    p5.add_argument("--pipeline-type", default=None, choices=["512", "1024", "1024_cascade"])
+    p5.add_argument("--seed", type=int, default=None)
+    p5.add_argument("--texture-size", type=int, default=None, choices=[512, 1024, 2048])
+    p5.add_argument(
+        "--target-mm",
+        type=float,
+        default=None,
+        help="Scale longest axis to this many mm (default: 120)",
+    )
+    p5.add_argument(
+        "--skip-generate",
+        action="store_true",
+        help="Skip trellis-mac; stage/scale an existing GLB instead",
+    )
+    p5.add_argument(
+        "--glb",
+        default=None,
+        help="With --skip-generate, path to an existing .glb to stage",
+    )
+    p5.set_defaults(func=cmd_generate_from_image)
 
     args = parser.parse_args()
     args.func(args)

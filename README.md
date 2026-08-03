@@ -32,7 +32,14 @@ Override via `config/printers/*.yaml` or CLI flags. Profiles for other beds can 
 
 ### Image-to-3D (Mac Studio, optional)
 
-[TRELLIS.2 via trellis-mac](docs/trellis-mac-integration.md) is planned as a **sibling upstream generator** (photo → GLB/STL), not merged into the cut engine. It feeds `data/raw/organic/` for Phase 4. Official TRELLIS.2 requires NVIDIA; the Mac port uses MPS/Metal.
+[TRELLIS.2 via trellis-mac](docs/trellis-mac-integration.md) is a **sibling upstream generator** (photo → GLB/STL), not merged into the cut engine. On Mac Studio, with `../trellis-mac` set up:
+
+```bash
+source .venv/bin/activate
+segmentation-ai generate-from-image path/to.png --slug my_figure --target-mm 120
+```
+
+Stages `data/raw/organic/<slug>/` for Phase 4 cutting. Official TRELLIS.2 requires NVIDIA; the Mac port uses MPS/Metal.
 
 ## Quick start (Mac Studio preferred)
 

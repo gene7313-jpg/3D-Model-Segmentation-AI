@@ -11,3 +11,10 @@ mechanical:
 cut:
   surface_samples: 64
   fill_caps: true
+# Sibling trellis-mac (Phase C) — generation stays in that venv
+trellis:
+  root: ../trellis-mac
+  pipeline_type: "512"
+  texture_size: 1024
+  seed: 42
+  target_longest_mm: 120.0

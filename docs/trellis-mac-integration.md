@@ -123,29 +123,38 @@ notes: "Figurine from photo; cut for P1S after repair"
 
 ### Phase C — Thin CLI glue in this repo
 
-Add an optional command that **does not** import trellis-mac into the default venv:
+Implemented: `segmentation-ai generate-from-image` shells out to trellis-mac (no PyTorch in this venv).
 
-```text
-segmentation-ai generate-from-image \
-  --image path/to.png \
+```bash
+cd ~/Desktop/Projects/3D-Model-Segmentation-AI
+source .venv/bin/activate
+pip install -e .
+
+segmentation-ai generate-from-image path/to.png \
   --slug my_figure \
   --trellis-root ../trellis-mac \
-  --pipeline-type 512
+  --pipeline-type 512 \
+  --target-mm 120
+```
+
+Re-stage an existing GLB without regenerating:
+
+```bash
+segmentation-ai generate-from-image path/to.png \
+  --slug my_figure \
+  --skip-generate \
+  --glb /path/to/model.glb \
+  --target-mm 120
 ```
 
 Behavior:
 
-1. Shell out to `trellis-mac`’s venv / `generate.py`.
-2. Write outputs under `data/raw/organic/<slug>/`.
-3. Write `meta.yaml`.
-4. Optionally convert GLB→STL and run `validate_parts` / oversized check.
-5. Stop before automatic organic cutting until Phase 4 seam rules exist.
+1. Subprocess: `trellis-mac/.venv/bin/python generate.py …`
+2. Stage under `data/raw/organic/<slug>/` (`source_image`, `source.glb`, `source.stl`, `source_<N>mm.stl`)
+3. Write `meta.yaml` with scale + P1S fit
+4. Stop before organic cutting (Phase D / roadmap Phase 4)
 
-Implementation sketch:
-
-- New module: `src/segmentation_ai/generate_trellis.py` (subprocess + path staging only).
-- Optional extra: `requirements-trellis.txt` **empty / docs-only** — real deps stay in trellis-mac’s venv.
-- Config knob in `config/defaults.yaml`: `trellis_root`, default pipeline type.
+Config: `config/defaults.yaml` → `trellis.*`
 
 **Exit criteria:** One command produces a staged organic project ready for human cut or later Phase 4.
 
