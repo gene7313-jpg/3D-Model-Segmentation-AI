@@ -105,7 +105,7 @@ Skips folders that lack a print STL. Continues on error unless `--fail-fast`. Qu
 | Flag | Side | Method |
 |------|------|--------|
 | `--with-pins` | Male only (FROZEN) | Concatenate high-res cylinders — do not change casually |
-| `--with-pin-holes` | Female sockets | Stepwise: cut-cap polygon − circle, then retriangulate (clean holes) |
+| `--with-pin-holes` | Female sockets | Local ROI plugs: remesh+boolean only around each pin, stitch back |
 | `--pin-remesh` | Female fallback | Lossy whole-part remesh + boolean |
 
 ```bash
@@ -113,10 +113,13 @@ Skips folders that lack a print STL. Continues on error unless `--fail-fast`. Qu
 segmentation-ai process-organic data/raw/organic/shoe_cli_full \
   --force-split --repair-mode basic --with-pins
 
-# Phase B — add holes after pins look good
+# Phase B — ROI socket plugs after pins look good
 segmentation-ai process-organic data/raw/organic/shoe_cli_full \
   --force-split --repair-mode basic --with-pins --with-pin-holes
 ```
+
+Expect log: `female: N ROI socket plug(s)` / `method=male+roi_plugs`.
+
 
 ## Quality gates
 

@@ -4,9 +4,9 @@ Male pins (FROZEN): high-res cylinders concatenated onto the cut face.
   Do not change ``add_male_pins_frozen`` without an explicit request — this path
   is visually verified on shoe_cli_full.
 
-Female sockets (stepwise): optional second pass. Rebuild the cut-cap polygon
-  with circular holes (shapely difference + retriangulate) — no face-delete
-  shredding, no whole-part remesh. Male path stays FROZEN.
+Female sockets: local ROI plugs (slicer-style boolean, localized).
+  For each pin, remesh/boolean only a small cylindrical region, then stitch the
+  holed plug back. Whole-part remesh is never used unless ``--pin-remesh``.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ class PinSpec:
 class PinReport:
     pin_count: int
     used_remesh: bool
-    method: str  # "male_only" | "cap_punch_step" | "boolean" | "none"
+    method: str  # "male_only" | "roi_plugs" | "cap_rebuild_step" | "boolean" | "none"
     notes: list[str] = field(default_factory=list)
     centers_uv: list[tuple[float, float]] = field(default_factory=list)
     layout_origin: np.ndarray | None = None
@@ -285,13 +285,239 @@ def _boolean_difference(a: Trimesh, b: Trimesh) -> Trimesh | None:
 
 
 def _ensure_volume_local(mesh: Trimesh, pitch: float) -> Trimesh:
-    """Lossy remesh — only for explicit --pin-remesh fallback."""
+    """Lossy remesh — ROI plugs or explicit --pin-remesh fallback."""
     try:
         vox = mesh.voxelized(pitch=pitch)
         filled = vox.fill()
-        return filled.marching_cubes
+        out = filled.marching_cubes
+        # marching_cubes is in voxel index space; map back to world
+        if hasattr(filled, "transform") and filled.transform is not None:
+            out = out.copy()
+            out.apply_transform(filled.transform)
+        return out
     except Exception:
         return mesh
+
+
+def _roi_face_mask(
+    mesh: Trimesh,
+    *,
+    origin: np.ndarray,
+    normal: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    center_uv: tuple[float, float],
+    roi_radius: float,
+    depth_mm: float,
+) -> np.ndarray:
+    """Faces whose centroids lie in a cylinder into the female (-normal)."""
+    n = normal / (np.linalg.norm(normal) + 1e-12)
+    pu, pv = center_uv
+    rel = mesh.triangles_center - origin
+    axial = -(rel @ n)  # >=0 into female
+    cu = rel @ u
+    cv = rel @ v
+    radial2 = (cu - pu) ** 2 + (cv - pv) ** 2
+    return (
+        (axial >= -0.8)
+        & (axial <= depth_mm + 0.8)
+        & (radial2 <= (roi_radius + 0.15) ** 2)
+    )
+
+
+def _build_roi_seed(
+    *,
+    origin: np.ndarray,
+    normal: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    center_uv: tuple[float, float],
+    roi_radius: float,
+    depth_mm: float,
+    sections: int,
+) -> Trimesh:
+    """Solid cylinder seed occupying the socket ROI (into female)."""
+    pu, pv = center_uv
+    base = origin + u * pu + v * pv + normal * 0.3
+    tip = origin + u * pu + v * pv - normal * (depth_mm + 0.3)
+    return _make_cylinder(base, tip, roi_radius, max(24, sections // 2))
+
+
+def _make_roi_plug(
+    female: Trimesh,
+    *,
+    origin: np.ndarray,
+    normal: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    center_uv: tuple[float, float],
+    hole_radius: float,
+    depth_mm: float,
+    pitch_mm: float,
+    sections: int,
+) -> tuple[Trimesh | None, np.ndarray, list[str]]:
+    """
+    Build a locally remeshed plug with a socket hole.
+
+    Returns (plug_or_None, roi_face_mask, notes).
+    """
+    notes: list[str] = []
+    # Wall around the hole so the plug is a ring/solid with depth
+    roi_radius = max(hole_radius + 1.8, hole_radius * 1.75)
+    face_mask = _roi_face_mask(
+        female,
+        origin=origin,
+        normal=normal,
+        u=u,
+        v=v,
+        center_uv=center_uv,
+        roi_radius=roi_radius,
+        depth_mm=depth_mm,
+    )
+    n_faces = int(np.count_nonzero(face_mask))
+    notes.append(f"roi faces={n_faces} r={roi_radius:.2f}mm depth={depth_mm:.2f}mm")
+
+    seed = _build_roi_seed(
+        origin=origin,
+        normal=normal,
+        u=u,
+        v=v,
+        center_uv=center_uv,
+        roi_radius=roi_radius,
+        depth_mm=depth_mm,
+        sections=sections,
+    )
+
+    pitch = float(np.clip(pitch_mm, 0.25, 0.7))
+    # Solid cylindrical seed → local volume (surface scraps not voxelized)
+    plug = _ensure_volume_local(seed, pitch=pitch)
+    if plug is None or len(plug.faces) == 0:
+        notes.append("roi voxel plug empty")
+        return None, face_mask, notes
+    notes.append(f"roi plug remesh pitch={pitch:.2f}mm faces={len(plug.faces)}")
+
+    pu, pv = center_uv
+    base = origin + u * pu + v * pv + normal * 0.6
+    tip = origin + u * pu + v * pv - normal * (depth_mm + 0.6)
+    hole = _make_cylinder(base, tip, hole_radius, sections)
+    if not getattr(hole, "is_volume", False):
+        hole = _ensure_volume_local(hole, pitch=min(0.35, pitch))
+
+    punched = _boolean_difference(plug, hole)
+    if punched is None:
+        notes.append("roi boolean difference failed")
+        return None, face_mask, notes
+
+    # Keep only the component nearest the pin axis (drop stray voxel scraps)
+    try:
+        parts = punched.split(only_watertight=False)
+        if len(parts) > 1:
+            axis_pt = origin + u * pu + v * pv - normal * (0.5 * depth_mm)
+
+            def _dist(p: Trimesh) -> float:
+                return float(np.linalg.norm(np.asarray(p.centroid) - axis_pt))
+
+            punched = min(parts, key=_dist)
+            notes.append(f"roi kept nearest of {len(parts)} components")
+    except Exception:
+        pass
+
+    # Hard clip: reject plugs that escaped the ROI bounding sphere
+    axis_pt = origin + u * pu + v * pv - normal * (0.5 * depth_mm)
+    if float(np.linalg.norm(np.asarray(punched.centroid) - axis_pt)) > roi_radius * 2.5:
+        notes.append("roi plug centroid outside ROI; rejected")
+        return None, face_mask, notes
+
+    return punched, face_mask, notes
+
+
+def apply_female_roi_plugs(
+    female: Trimesh,
+    *,
+    origin: np.ndarray,
+    normal: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    centers_uv: list[tuple[float, float]],
+    hole_radius: float,
+    depth_mm: float,
+    pitch_mm: float = 0.4,
+    sections: int = 48,
+) -> tuple[Trimesh, list[str], int]:
+    """
+    Stepwise local ROI plugs: remesh+boolean only around each pin, stitch back.
+
+    Body triangles outside each ROI are preserved. Local remesh is confined to
+    the plug (not whole-part).
+    """
+    notes: list[str] = []
+    out = female.copy()
+    ext0 = np.asarray(female.extents, dtype=float)
+    plugs_ok = 0
+    # Union of ROI masks to strip once at the end per step (strip per hole)
+    for step, center in enumerate(centers_uv, start=1):
+        before = out
+        faces_before = len(before.faces)
+        plug, roi_mask, plug_notes = _make_roi_plug(
+            before,
+            origin=origin,
+            normal=normal,
+            u=u,
+            v=v,
+            center_uv=center,
+            hole_radius=hole_radius,
+            depth_mm=depth_mm,
+            pitch_mm=pitch_mm,
+            sections=sections,
+        )
+        for n in plug_notes:
+            notes.append(f"hole[{step}] {n}")
+        if plug is None:
+            notes.append(f"hole[{step}/{len(centers_uv)}] WARN roi plug failed")
+            continue
+
+        # Recompute mask on current mesh (indices valid for `before`)
+        roi_mask = _roi_face_mask(
+            before,
+            origin=origin,
+            normal=normal,
+            u=u,
+            v=v,
+            center_uv=center,
+            roi_radius=max(hole_radius + 1.8, hole_radius * 1.75),
+            depth_mm=depth_mm,
+        )
+        body = _strip_faces(before, roi_mask)
+        try:
+            merged = trimesh.util.concatenate([body, plug])
+            merged.merge_vertices()
+        except Exception as exc:
+            notes.append(f"hole[{step}] stitch failed ({exc})")
+            continue
+
+        ext1 = np.asarray(merged.extents, dtype=float)
+        if np.any(ext1 > ext0 * 1.2 + 8.0):
+            notes.append(
+                f"hole[{step}] aborted extent {ext0.round(1)}→{ext1.round(1)}"
+            )
+            continue
+
+        out = merged
+        plugs_ok += 1
+        notes.append(
+            f"hole[{step}/{len(centers_uv)}] center=({center[0]:.1f},{center[1]:.1f}) "
+            f"roi plug stitched ({faces_before}→{len(out.faces)}) [ok]"
+        )
+
+    if plugs_ok == 0:
+        notes.append("roi plugs: 0 sockets applied")
+        return female.copy(), notes, 0
+
+    notes.append(
+        f"female: {plugs_ok} ROI socket plug(s) "
+        f"(local remesh+boolean only; body outside ROI preserved)"
+    )
+    return out, notes, plugs_ok
 
 
 def _side_sign(part: Trimesh, origin: np.ndarray, normal: np.ndarray) -> float:
@@ -1004,7 +1230,7 @@ def apply_mating_pins(
     Apply mating features in separate phases.
 
     - apply_male=True  → FROZEN male pin concatenate
-    - apply_holes=True → stepwise female cap punch (one hole at a time)
+    - apply_holes=True → female ROI socket plugs (local remesh+boolean)
     - centers_uv       → reuse male-phase pin centers so holes align
     """
     notes: list[str] = []
@@ -1063,7 +1289,9 @@ def apply_mating_pins(
 
     if apply_holes:
         hole_r = spec.radius_mm + spec.clearance_mm
-        female, hole_notes, n_removed = punch_female_sockets_stepwise(
+        # Primary: local ROI plugs (slicer-style boolean, localized)
+        roi_pitch = min(0.45, max(0.3, remesh_pitch_mm * 0.5))
+        female, hole_notes, n_ok = apply_female_roi_plugs(
             female,
             origin=layout.origin,
             normal=layout.normal,
@@ -1071,42 +1299,63 @@ def apply_mating_pins(
             v=layout.v,
             centers_uv=layout.centers_uv,
             hole_radius=hole_r,
+            depth_mm=spec.length_mm,
+            pitch_mm=roi_pitch,
+            sections=spec.sections,
         )
         notes.extend(hole_notes)
-        if n_removed > 0:
-            method = "cap_rebuild_step" if not apply_male else "male+cap_rebuild_step"
-        elif allow_remesh:
-            used_remesh = True
-            method = "boolean"
-            pitch = remesh_pitch_mm
-            f_vol = _ensure_volume_local(female, pitch=pitch)
-            notes.append(f"female whole-part remesh pitch={pitch}mm (allow_remesh)")
-            ok = True
-            for i, (cu, cv) in enumerate(layout.centers_uv, start=1):
-                base = layout.origin + layout.u * cu + layout.v * cv
-                tip = base - layout.normal * spec.length_mm
-                hole = _make_cylinder(
-                    base + layout.normal * 0.5,
-                    tip - layout.normal * 0.5,
-                    hole_r,
-                    spec.sections,
-                )
-                punched = _boolean_difference(f_vol, hole)
-                if punched is None:
-                    notes.append(f"hole[{i}] remesh boolean failed")
-                    ok = False
-                    break
-                f_vol = punched
-                notes.append(f"hole[{i}] remesh boolean ok")
-            if ok:
-                female = f_vol
-            else:
-                notes.append("remesh boolean aborted; female left at last good stepwise state")
+        if n_ok > 0:
+            method = "roi_plugs" if not apply_male else "male+roi_plugs"
         else:
-            notes.append(
-                "sockets: no faces fully inside hole circles "
-                "(large cut triangles — holes deferred; male pins unchanged)"
+            # Fallback: planar cut-cap rebuild (no local volume)
+            notes.append("roi plugs failed; falling back to cut-cap rebuild")
+            female, cap_notes, n_ok = punch_female_sockets_stepwise(
+                out[layout.female_index].copy(),
+                origin=layout.origin,
+                normal=layout.normal,
+                u=layout.u,
+                v=layout.v,
+                centers_uv=layout.centers_uv,
+                hole_radius=hole_r,
             )
+            notes.extend(cap_notes)
+            if n_ok > 0:
+                method = (
+                    "cap_rebuild_step" if not apply_male else "male+cap_rebuild_step"
+                )
+            elif allow_remesh:
+                used_remesh = True
+                method = "boolean"
+                pitch = remesh_pitch_mm
+                f_vol = _ensure_volume_local(
+                    out[layout.female_index].copy(), pitch=pitch
+                )
+                notes.append(f"female whole-part remesh pitch={pitch}mm (allow_remesh)")
+                ok = True
+                for i, (cu, cv) in enumerate(layout.centers_uv, start=1):
+                    base = layout.origin + layout.u * cu + layout.v * cv
+                    tip = base - layout.normal * spec.length_mm
+                    hole = _make_cylinder(
+                        base + layout.normal * 0.5,
+                        tip - layout.normal * 0.5,
+                        hole_r,
+                        spec.sections,
+                    )
+                    punched = _boolean_difference(f_vol, hole)
+                    if punched is None:
+                        notes.append(f"hole[{i}] remesh boolean failed")
+                        ok = False
+                        break
+                    f_vol = punched
+                    notes.append(f"hole[{i}] remesh boolean ok")
+                if ok:
+                    female = f_vol
+                else:
+                    female = out[layout.female_index].copy()
+                    notes.append("whole-part remesh boolean aborted")
+            else:
+                female = out[layout.female_index].copy()
+                notes.append("sockets skipped (roi+cap failed; male pins unchanged)")
         out[layout.female_index] = female
 
     return PinApplyResult(

@@ -373,7 +373,7 @@ def main() -> None:
     p6.add_argument(
         "--with-pin-holes",
         action="store_true",
-        help="Add female sockets stepwise (one hole at a time; separate from --with-pins)",
+        help="Add female sockets via local ROI plugs (separate from --with-pins)",
     )
     p6.add_argument(
         "--pin-remesh",
@@ -399,7 +399,7 @@ def main() -> None:
         p.add_argument(
             "--with-pin-holes",
             action="store_true",
-            help="Female sockets stepwise (separate from male pins)",
+            help="Female ROI socket plugs (separate from male pins)",
         )
         p.add_argument(
             "--pin-remesh",

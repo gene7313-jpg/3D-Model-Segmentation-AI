@@ -187,7 +187,7 @@ def cut_organic_project(
     if with_pins or with_pin_holes:
         print(
             "Pins: male path is FROZEN (concatenate only). "
-            "Female holes are a separate stepwise pass (--with-pin-holes)."
+            "Female holes use local ROI plugs (--with-pin-holes)."
         )
 
     quality_reports: list[QualityReport] = []
