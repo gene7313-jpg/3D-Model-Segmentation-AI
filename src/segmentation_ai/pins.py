@@ -1328,6 +1328,12 @@ def apply_female_cap_and_sleeves(
         f"female: {n_holes} clean cap hole(s) + {sleeves_ok} recessed sleeve(s) "
         f"(no body ROI strip, no embossed plugs)"
     )
+    # Sleeves often stay disconnected → Bambu "floating region". Keep largest shell
+    # (cut-cap holes remain); drop floating sleeve scraps for sliceability.
+    from .print_prep import consolidate_for_print
+
+    out, prep_notes = consolidate_for_print(out, keep_min_faces=0)
+    notes.extend(prep_notes)
     return out, notes, n_holes
 
 

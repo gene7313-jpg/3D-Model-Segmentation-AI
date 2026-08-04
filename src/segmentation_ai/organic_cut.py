@@ -334,9 +334,14 @@ def cut_organic_project(
             old.unlink()
     parts_dir.mkdir(parents=True, exist_ok=True)
 
+    from .print_prep import consolidate_for_print
+
     part_paths: list[Path] = []
     part_meta = []
     for i, part in enumerate(result.parts, start=1):
+        part, prep_notes = consolidate_for_print(part, keep_min_faces=0)
+        for note in prep_notes:
+            print(f"  part_{i:02d}: {note}")
         path = parts_dir / f"part_{i:02d}.stl"
         part.export(path)
         part_paths.append(path)
