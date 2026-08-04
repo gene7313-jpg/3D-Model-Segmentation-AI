@@ -4,9 +4,9 @@ Male pins (FROZEN): high-res cylinders concatenated onto the cut face.
   Do not change ``add_male_pins_frozen`` without an explicit request — this path
   is visually verified on shoe_cli_full.
 
-Female sockets: local ROI plugs (slicer-style boolean, localized).
-  For each pin, remesh/boolean only a small cylindrical region, then stitch the
-  holed plug back. Whole-part remesh is never used unless ``--pin-remesh``.
+Female sockets: clean cut-cap holes + recessed sleeves.
+  Rebuild the planar cut-cap with circular holes, then add tube sleeves that sit
+  entirely on the female side of the plane (no embossed bosses, no body ROI strip).
 """
 
 from __future__ import annotations
@@ -336,11 +336,45 @@ def _build_roi_seed(
     depth_mm: float,
     sections: int,
 ) -> Trimesh:
-    """Solid cylinder seed occupying the socket ROI (into female)."""
+    """Solid cylinder seed entirely on the female side of the cut (-normal)."""
     pu, pv = center_uv
-    base = origin + u * pu + v * pv + normal * 0.3
-    tip = origin + u * pu + v * pv - normal * (depth_mm + 0.3)
-    return _make_cylinder(base, tip, roi_radius, max(24, sections // 2))
+    # Flush/slightly recessed at the cut plane — never proud toward the male.
+    top = origin + u * pu + v * pv - normal * 0.05
+    bot = origin + u * pu + v * pv - normal * (depth_mm + 0.05)
+    return _make_cylinder(top, bot, roi_radius, max(24, sections // 2))
+
+
+def _make_recessed_sleeve(
+    *,
+    origin: np.ndarray,
+    normal: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    center_uv: tuple[float, float],
+    hole_radius: float,
+    depth_mm: float,
+    wall_mm: float = 1.2,
+    sections: int = 48,
+) -> Trimesh | None:
+    """
+    Tube sleeve for pin depth: entirely recessed into female (-n).
+
+    Uses analytic cylinders + boolean (no voxel) so rims stay clean.
+    """
+    outer_r = hole_radius + wall_mm
+    pu, pv = center_uv
+    top = origin + u * pu + v * pv - normal * 0.05
+    bot = origin + u * pu + v * pv - normal * (depth_mm + 0.05)
+    outer = _make_cylinder(top, bot, outer_r, sections)
+    # Oversize the bore tool slightly past the sleeve ends for a clean through-hole
+    bore = _make_cylinder(
+        top + normal * 0.4,
+        bot - normal * 0.4,
+        hole_radius,
+        sections,
+    )
+    punched = _boolean_difference(outer, bore)
+    return punched
 
 
 def _make_roi_plug(
@@ -1212,6 +1246,88 @@ def punch_female_sockets_stepwise(
     return out, notes, holes_ok
 
 
+def apply_female_cap_and_sleeves(
+    female: Trimesh,
+    *,
+    origin: np.ndarray,
+    normal: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    centers_uv: list[tuple[float, float]],
+    hole_radius: float,
+    depth_mm: float,
+    sections: int = 48,
+) -> tuple[Trimesh, list[str], int]:
+    """
+    Female sockets that don't emboss or gouge the body:
+
+    1) Rebuild cut-cap with clean circular holes (planar earcut).
+    2) Add recessed tube sleeves entirely on the female side for pin depth.
+    Never strips organic side-wall faces (avoids wedge gaps).
+    """
+    notes: list[str] = []
+    ext0 = np.asarray(female.extents, dtype=float)
+
+    capped, cap_notes, n_holes = punch_female_sockets_stepwise(
+        female,
+        origin=origin,
+        normal=normal,
+        u=u,
+        v=v,
+        centers_uv=centers_uv,
+        hole_radius=hole_radius,
+    )
+    notes.extend(cap_notes)
+    if n_holes == 0:
+        notes.append("cap+sleeves aborted: no cut-cap holes")
+        return female.copy(), notes, 0
+
+    sleeves: list[Trimesh] = [capped]
+    sleeves_ok = 0
+    for step, center in enumerate(centers_uv, start=1):
+        sleeve = _make_recessed_sleeve(
+            origin=origin,
+            normal=normal,
+            u=u,
+            v=v,
+            center_uv=center,
+            hole_radius=hole_radius,
+            depth_mm=depth_mm,
+            sections=sections,
+        )
+        if sleeve is None or len(sleeve.faces) == 0:
+            notes.append(f"sleeve[{step}] boolean failed; hole kept without tube")
+            continue
+        # Guard: sleeve must not stick out past the cut toward male
+        n = normal / (np.linalg.norm(normal) + 1e-12)
+        proud = float(np.max((sleeve.vertices - origin) @ n))
+        if proud > 0.15:
+            sleeve.vertices = sleeve.vertices - n * (proud + 0.05)
+            notes.append(f"sleeve[{step}] pushed flush (was proud {proud:.2f}mm)")
+        sleeves.append(sleeve)
+        sleeves_ok += 1
+        notes.append(
+            f"sleeve[{step}/{len(centers_uv)}] center=({center[0]:.1f},{center[1]:.1f}) "
+            f"recessed tube ok [ok]"
+        )
+
+    out = trimesh.util.concatenate(sleeves)
+    out.merge_vertices()
+    ext1 = np.asarray(out.extents, dtype=float)
+    if np.any(ext1 > ext0 * 1.15 + 8.0):
+        notes.append(
+            f"cap+sleeves aborted (extent {ext0.round(1)}→{ext1.round(1)}); "
+            "keeping cap-only"
+        )
+        return capped, notes, n_holes
+
+    notes.append(
+        f"female: {n_holes} clean cap hole(s) + {sleeves_ok} recessed sleeve(s) "
+        f"(no body ROI strip, no embossed plugs)"
+    )
+    return out, notes, n_holes
+
+
 def apply_mating_pins(
     parts: list[Trimesh],
     *,
@@ -1230,7 +1346,7 @@ def apply_mating_pins(
     Apply mating features in separate phases.
 
     - apply_male=True  → FROZEN male pin concatenate
-    - apply_holes=True → female ROI socket plugs (local remesh+boolean)
+    - apply_holes=True → female clean cap holes + recessed sleeves
     - centers_uv       → reuse male-phase pin centers so holes align
     """
     notes: list[str] = []
@@ -1289,9 +1405,8 @@ def apply_mating_pins(
 
     if apply_holes:
         hole_r = spec.radius_mm + spec.clearance_mm
-        # Primary: local ROI plugs (slicer-style boolean, localized)
-        roi_pitch = min(0.45, max(0.3, remesh_pitch_mm * 0.5))
-        female, hole_notes, n_ok = apply_female_roi_plugs(
+        # Primary: clean cap holes + recessed sleeves (no embossed ROI plugs)
+        female, hole_notes, n_ok = apply_female_cap_and_sleeves(
             female,
             origin=layout.origin,
             normal=layout.normal,
@@ -1300,62 +1415,40 @@ def apply_mating_pins(
             centers_uv=layout.centers_uv,
             hole_radius=hole_r,
             depth_mm=spec.length_mm,
-            pitch_mm=roi_pitch,
             sections=spec.sections,
         )
         notes.extend(hole_notes)
         if n_ok > 0:
-            method = "roi_plugs" if not apply_male else "male+roi_plugs"
+            method = "cap_sleeves" if not apply_male else "male+cap_sleeves"
+        elif allow_remesh:
+            used_remesh = True
+            method = "boolean"
+            pitch = remesh_pitch_mm
+            f_vol = _ensure_volume_local(out[layout.female_index].copy(), pitch=pitch)
+            notes.append(f"female whole-part remesh pitch={pitch}mm (allow_remesh)")
+            ok = True
+            for i, (cu, cv) in enumerate(layout.centers_uv, start=1):
+                base = layout.origin + layout.u * cu + layout.v * cv
+                tip = base - layout.normal * spec.length_mm
+                hole = _make_cylinder(
+                    base + layout.normal * 0.5,
+                    tip - layout.normal * 0.5,
+                    hole_r,
+                    spec.sections,
+                )
+                punched = _boolean_difference(f_vol, hole)
+                if punched is None:
+                    notes.append(f"hole[{i}] remesh boolean failed")
+                    ok = False
+                    break
+                f_vol = punched
+                notes.append(f"hole[{i}] remesh boolean ok")
+            female = f_vol if ok else out[layout.female_index].copy()
+            if not ok:
+                notes.append("whole-part remesh boolean aborted")
         else:
-            # Fallback: planar cut-cap rebuild (no local volume)
-            notes.append("roi plugs failed; falling back to cut-cap rebuild")
-            female, cap_notes, n_ok = punch_female_sockets_stepwise(
-                out[layout.female_index].copy(),
-                origin=layout.origin,
-                normal=layout.normal,
-                u=layout.u,
-                v=layout.v,
-                centers_uv=layout.centers_uv,
-                hole_radius=hole_r,
-            )
-            notes.extend(cap_notes)
-            if n_ok > 0:
-                method = (
-                    "cap_rebuild_step" if not apply_male else "male+cap_rebuild_step"
-                )
-            elif allow_remesh:
-                used_remesh = True
-                method = "boolean"
-                pitch = remesh_pitch_mm
-                f_vol = _ensure_volume_local(
-                    out[layout.female_index].copy(), pitch=pitch
-                )
-                notes.append(f"female whole-part remesh pitch={pitch}mm (allow_remesh)")
-                ok = True
-                for i, (cu, cv) in enumerate(layout.centers_uv, start=1):
-                    base = layout.origin + layout.u * cu + layout.v * cv
-                    tip = base - layout.normal * spec.length_mm
-                    hole = _make_cylinder(
-                        base + layout.normal * 0.5,
-                        tip - layout.normal * 0.5,
-                        hole_r,
-                        spec.sections,
-                    )
-                    punched = _boolean_difference(f_vol, hole)
-                    if punched is None:
-                        notes.append(f"hole[{i}] remesh boolean failed")
-                        ok = False
-                        break
-                    f_vol = punched
-                    notes.append(f"hole[{i}] remesh boolean ok")
-                if ok:
-                    female = f_vol
-                else:
-                    female = out[layout.female_index].copy()
-                    notes.append("whole-part remesh boolean aborted")
-            else:
-                female = out[layout.female_index].copy()
-                notes.append("sockets skipped (roi+cap failed; male pins unchanged)")
+            female = out[layout.female_index].copy()
+            notes.append("sockets skipped (cap+sleeves failed; male pins unchanged)")
         out[layout.female_index] = female
 
     return PinApplyResult(
