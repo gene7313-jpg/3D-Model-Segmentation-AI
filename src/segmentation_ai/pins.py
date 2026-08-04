@@ -1,12 +1,15 @@
 """Mating pin/socket features for cut-plane alignment (quality-preserving).
 
-Male pins (FROZEN): high-res cylinders concatenated onto the cut face.
-  Do not change ``add_male_pins_frozen`` without an explicit request — this path
-  is visually verified on shoe_cli_full.
+FROZEN (shoe_cli_full verified 2026-08-03 — do not change casually):
 
-Female sockets: clean cut-cap holes + recessed sleeves.
-  Rebuild the planar cut-cap with circular holes, then add tube sleeves that sit
-  entirely on the female side of the plane (no embossed bosses, no body ROI strip).
+- Male: ``add_male_pins_frozen`` — concatenate high-res cylinders on the cut face.
+- Female: ``apply_female_cap_and_sleeves`` — rebuild cut-cap with circular holes +
+  recessed tube sleeves entirely on the female side of the plane.
+
+CLI: ``--with-pins --with-pin-holes`` → method ``male+cap_sleeves``.
+
+Rejected approaches (do not revive without a new design review):
+whole-part voxel remesh, AABB/outline wafers, face-delete punch, embossed ROI plugs.
 """
 
 from __future__ import annotations
@@ -1259,7 +1262,7 @@ def apply_female_cap_and_sleeves(
     sections: int = 48,
 ) -> tuple[Trimesh, list[str], int]:
     """
-    Female sockets that don't emboss or gouge the body:
+    FROZEN female-socket path (shoe_cli_full verified).
 
     1) Rebuild cut-cap with clean circular holes (planar earcut).
     2) Add recessed tube sleeves entirely on the female side for pin depth.

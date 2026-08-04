@@ -44,11 +44,12 @@ Stages `data/raw/organic/<slug>/` then cut for print:
 ```bash
 # Quality-first split (recommended)
 segmentation-ai process-organic data/raw/organic/my_figure --force-split --repair-mode basic
-# Pins later (optional; --pin-remesh can reduce quality on the socket half)
-segmentation-ai process-organic data/raw/organic/my_figure --force-split --repair-mode basic --with-pins
+# FROZEN mating pins: male concatenate + female cut-cap holes / recessed sleeves
+segmentation-ai process-organic data/raw/organic/my_figure \
+  --force-split --repair-mode basic --with-pins --with-pin-holes
 ```
 
-Pipeline plan: [docs/organic-pipeline.md](docs/organic-pipeline.md). Official TRELLIS.2 requires NVIDIA; the Mac port uses MPS/Metal.
+Pipeline plan (frozen pin method + remaining tasks): [docs/organic-pipeline.md](docs/organic-pipeline.md). Official TRELLIS.2 requires NVIDIA; the Mac port uses MPS/Metal.
 
 ## Quick start (Mac Studio preferred)
 

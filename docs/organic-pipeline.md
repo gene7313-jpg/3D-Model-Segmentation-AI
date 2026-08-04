@@ -10,37 +10,25 @@ Apply the printability nodes to **existing** organic projects under `data/raw/or
 [existing print STL]
         │
         ▼
-   repair (auto/voxel)     → source_repaired.stl   (watertight)
+   repair (basic)          → source_repaired.stl
         │
         ▼
    split (mid-plane)       → parts/part_XX.stl     (P1S fit)
         │
         ▼
-   pins (optional)         → pin + socket on cut faces
+   pins (optional, FROZEN) → male pins + female sockets on cut faces
         │
         ▼
-   meta.yaml update
+   quality gates + meta.yaml
 ```
 
 | Node | Module / CLI | Purpose |
 |------|----------------|---------|
-| **repair** | `repair.py` via `--repair-mode basic\|voxel` | **basic** (default) preserves detail; **voxel** forces watertight but is lossy/blocky |
+| **repair** | `repair.py` via `--repair-mode basic\|voxel` | **basic** (default) preserves detail; **voxel** is lossy/blocky |
 | **split** | `organic_cut.py` | Longest-axis mid-plane until parts fit (or `--force-split`) |
-| **pins** | `pins.py` via `--with-pins` | Male pin + female socket on mating cut faces (run on basic-cut meshes) |
+| **pins** | `pins.py` via `--with-pins` / `--with-pin-holes` | FROZEN mating features (see below) |
+| **quality** | `quality.py` | Face-keep / remesh / extent gates |
 | **batch** | `process-organic` / `process-organic-batch` | Run nodes on one or many existing slugs |
-
-**Quality-first workflow (current focus):**
-
-```bash
-# High-res split only — no pins, no remesh
-segmentation-ai process-organic data/raw/organic/shoe_cli_full \
-  --force-split \
-  --repair-mode basic
-```
-
-Expect `parts/part_*.stl` face counts on the same order as half of `source_120mm.stl` (~80k–120k), not ~12k.
-
-Pins are **secondary**. `--with-pins` concatenates male pins without remeshing; sockets need a solid volume and only remesh if you pass `--pin-remesh` (quality tradeoff).
 
 ## Existing project prerequisites
 
@@ -61,65 +49,43 @@ data/raw/organic/<slug>/
   meta.yaml
 ```
 
-## Single project
+## Verified command (FROZEN — shoe_cli_full)
 
 ```bash
 cd ~/Desktop/Projects/3D-Model-Segmentation-AI
 source .venv/bin/activate
-git fetch origin
 git checkout feature/organic-repair-split-pins
 pip install -e .
 
-# Repair + split + quality-preserving pins
 segmentation-ai process-organic data/raw/organic/shoe_cli_full \
   --force-split \
   --repair-mode basic \
-  --with-pins
+  --with-pins \
+  --with-pin-holes
 
-# Face counts + quality ratios
 python scripts/diagnose_organic.py shoe_cli_full
 ```
 
-Do **not** use `--repair-mode voxel` for organic detail. Do **not** pass `--pin-remesh` unless the wafer socket path fails and you accept a lossy female remesh.
+Expect log:
 
-Equivalent lower-level command:
+- `male: concatenated 2 pins ... [FROZEN]`
+- `female: 2 clean cap hole(s) + 2 recessed sleeve(s) ...`
+- `Holes method=cap_sleeves` / overall `method=male+cap_sleeves`
+- `Quality overall: PASS`
 
-```bash
-segmentation-ai cut-organic data/raw/organic/shoe_cli_full \
-  --force-split --repair-mode basic --with-pins
-```
+Do **not** use `--repair-mode voxel` for organic detail. Do **not** use `--pin-remesh` unless you explicitly accept whole-part lossy remesh.
 
-## Batch all organic slugs
+## Pins (FROZEN)
 
-```bash
-segmentation-ai process-organic-batch data/raw/organic \
-  --force-split \
-  --repair-mode basic \
-  --with-pins
-```
+| Flag | Side | Implementation | Status |
+|------|------|----------------|--------|
+| `--with-pins` | Male | `add_male_pins_frozen` — concatenate Ø×L cylinders | **FROZEN** |
+| `--with-pin-holes` | Female | `apply_female_cap_and_sleeves` — earcut cut-cap holes + recessed sleeves | **FROZEN** |
+| `--pin-remesh` | Female fallback | Whole-part voxel + boolean | Last resort only |
 
-Skips folders that lack a print STL. Continues on error unless `--fail-fast`. Quality gate failure exits with code `2` (override with `--allow-quality-fail`).
+**Rejected** (do not revive without a design review): whole-model voxel remesh for sockets, AABB/outline wafers, face-delete / subdivision punch, embossed ROI voxel plugs that sit proud of the cut and strip body faces.
 
-## Pins (quality-preserving, two phases)
-
-| Flag | Side | Method |
-|------|------|--------|
-| `--with-pins` | Male only (FROZEN) | Concatenate high-res cylinders — do not change casually |
-| `--with-pin-holes` | Female sockets | Clean cut-cap holes + recessed tube sleeves (no embossed ROI plugs) |
-| `--pin-remesh` | Female fallback | Lossy whole-part remesh + boolean |
-
-```bash
-# Phase A — pins only (verified good)
-segmentation-ai process-organic data/raw/organic/shoe_cli_full \
-  --force-split --repair-mode basic --with-pins
-
-# Phase B — ROI socket plugs after pins look good
-segmentation-ai process-organic data/raw/organic/shoe_cli_full \
-  --force-split --repair-mode basic --with-pins --with-pin-holes
-```
-
-Expect log: `female: N clean cap hole(s) + N recessed sleeve(s)` / `method=male+cap_sleeves`.
-
+Defaults: `config/defaults.yaml` → `organic_cut.pins` (`diameter_mm: 4.0`, `clearance_mm: 0.25`, `length_mm: 8.0`, `count: 2`).
 
 ## Quality gates
 
@@ -129,29 +95,41 @@ Built into `process-organic` / `cut-organic` (`src/segmentation_ai/quality.py`):
 |-------|------------|
 | Repair | Face keep ratio &lt; 0.70, or unexpected voxel remesh |
 | Cut | Part face sum &lt; 0.70× input, or a part &lt; 0.15× input |
-| Pins | No pins applied, remesh without `--pin-remesh`, or face collapse |
+| Pins | No pins applied, remesh without `--pin-remesh`, face collapse, or extent blow-up |
 
-Results are written to `meta.yaml` → `quality`.
+Results are written to `meta.yaml` → `quality`. Exit code `2` on quality fail (`--allow-quality-fail` to ignore).
 
-## Pin defaults
+## Batch
 
-From `config/defaults.yaml` → `organic_cut.pins`:
+```bash
+segmentation-ai process-organic-batch data/raw/organic \
+  --force-split \
+  --repair-mode basic \
+  --with-pins \
+  --with-pin-holes
+```
 
-| Setting | Default | Notes |
-|---------|---------|--------|
-| `diameter_mm` | 4.0 | Male pin OD |
-| `clearance_mm` | 0.25 | Female hole radius += clearance |
-| `length_mm` | 8.0 | Engagement length |
-| `count` | 2 | Along major axis of cut face |
+## Remaining tasks
+
+| Priority | Task | Notes |
+|----------|------|--------|
+| 1 | **Print fit test** | Slice/print shoe halves; check pin↔socket clearance and engagement |
+| 2 | **Manifold cleanup** | Cap/sleeve join can report a few non-manifold edges in PreForm; tighten weld / shared rim verts if slicers complain |
+| 3 | **Merge PR** | Land `feature/organic-repair-split-pins` → `main` after print confidence |
+| 4 | **Smarter aesthetic seams** | Replace longest-axis mid-plane with contour / feature-aware cuts |
+| 5 | **Multi-split pins** | Pins currently require exactly 2 parts from one mid-plane; generalize for recursive splits |
+| 6 | **Pin placement UX** | Optional count/margin overrides; avoid shoe openings when snapping centers |
+| 7 | **Mechanical track** | Separate from organic: ingest, wall thickness, planar registers |
+| 8 | **TRELLIS batch** | More organic slugs through generate → process → diagnose |
 
 ## Roadmap tie-in
 
 | Priority | Item | Status |
 |----------|------|--------|
-| 1 | Stronger repair (voxel) | Done on `main`; used here |
-| 2 | Apply nodes to existing models (batch) | This branch |
-| 3 | Mating pins on cut faces | This branch |
-| 4 | Smarter aesthetic seams | Next after pins |
+| 1 | Stronger repair (voxel available, basic preferred) | Done |
+| 2 | Apply nodes to existing models (batch) | Done on this branch |
+| 3 | Mating pins on cut faces | **FROZEN** on this branch |
+| 4 | Smarter aesthetic seams | Next |
 | 5 | Mechanical ingest / ML | Parallel track |
 
 See also: [trellis-mac-integration.md](trellis-mac-integration.md).
