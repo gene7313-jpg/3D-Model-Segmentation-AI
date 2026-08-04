@@ -105,7 +105,7 @@ Skips folders that lack a print STL. Continues on error unless `--fail-fast`. Qu
 | Flag | Side | Method |
 |------|------|--------|
 | `--with-pins` | Male only (FROZEN) | Concatenate high-res cylinders — do not change casually |
-| `--with-pin-holes` | Female sockets | Stepwise: refine near one hole, punch, then next hole |
+| `--with-pin-holes` | Female sockets | Stepwise: cut-cap polygon − circle, then retriangulate (clean holes) |
 | `--pin-remesh` | Female fallback | Lossy whole-part remesh + boolean |
 
 ```bash

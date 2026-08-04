@@ -4,8 +4,9 @@ Male pins (FROZEN): high-res cylinders concatenated onto the cut face.
   Do not change ``add_male_pins_frozen`` without an explicit request — this path
   is visually verified on shoe_cli_full.
 
-Female sockets (stepwise): optional second pass. Each hole is punched one at a
-  time into the existing cut-cap triangles (no wafer, no remesh).
+Female sockets (stepwise): optional second pass. Rebuild the cut-cap polygon
+  with circular holes (shapely difference + retriangulate) — no face-delete
+  shredding, no whole-part remesh. Male path stays FROZEN.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import trimesh
 from shapely.geometry import MultiPolygon, Point, Polygon
 from shapely.ops import unary_union
 from trimesh import Trimesh
-from trimesh.creation import cylinder
+from trimesh.creation import cylinder, triangulate_polygon
 
 
 @dataclass
@@ -808,6 +809,83 @@ def _force_carve_uv_disk(
     return out, n_removed
 
 
+def _strip_faces(mesh: Trimesh, face_mask: np.ndarray) -> Trimesh:
+    if not np.any(face_mask):
+        return mesh.copy()
+    keep = ~face_mask
+    try:
+        return mesh.submesh([np.where(keep)[0]], append=True)
+    except Exception:
+        out = mesh.copy()
+        out.update_faces(keep)
+        out.remove_unreferenced_vertices()
+        return out
+
+
+def _triangulate_polygon_2d(polygon: Polygon) -> tuple[np.ndarray, np.ndarray]:
+    """Triangulate a (possibly holed) polygon; earcut/triangle if present else Delaunay."""
+    for engine in ("earcut", "triangle", None):
+        try:
+            if engine is None:
+                break
+            return triangulate_polygon(polygon, engine=engine)
+        except Exception:
+            continue
+
+    # Fallback: boundary Delaunay kept only where centroid is inside polygon
+    from scipy.spatial import Delaunay
+
+    ring_pts: list[list[float]] = []
+    coords = list(polygon.exterior.coords)[:-1]
+    # Densify exterior a bit for stabler triangles
+    for a, b in zip(coords, coords[1:] + coords[:1]):
+        ring_pts.append([float(a[0]), float(a[1])])
+        mid = (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]))
+        ring_pts.append([float(mid[0]), float(mid[1])])
+    for interior in polygon.interiors:
+        ic = list(interior.coords)[:-1]
+        for a, b in zip(ic, ic[1:] + ic[:1]):
+            ring_pts.append([float(a[0]), float(a[1])])
+            mid = (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]))
+            ring_pts.append([float(mid[0]), float(mid[1])])
+    pts = np.asarray(ring_pts, dtype=float)
+    # Unique rows
+    pts = np.unique(np.round(pts, 6), axis=0)
+    if len(pts) < 3:
+        raise ValueError("not enough polygon samples to triangulate")
+    delaunay = Delaunay(pts)
+    faces: list[list[int]] = []
+    for simplex in delaunay.simplices:
+        c = pts[simplex].mean(axis=0)
+        if polygon.contains(Point(float(c[0]), float(c[1]))):
+            faces.append([int(simplex[0]), int(simplex[1]), int(simplex[2])])
+    if not faces:
+        raise ValueError("Delaunay produced no interior triangles")
+    return pts, np.asarray(faces, dtype=np.int64)
+
+
+def _cap_mesh_from_polygon(
+    polygon: Polygon,
+    *,
+    origin: np.ndarray,
+    normal: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+) -> Trimesh:
+    """Planar retriangulation of a (possibly holed) cut-cap polygon."""
+    verts2, faces = _triangulate_polygon_2d(polygon)
+    verts3 = (
+        origin
+        + np.outer(verts2[:, 0], u)
+        + np.outer(verts2[:, 1], v)
+        - normal * 0.02
+    )
+    cap = Trimesh(vertices=verts3, faces=faces, process=True)
+    if len(cap.faces) and float(np.dot(cap.face_normals.mean(axis=0), normal)) < 0:
+        cap.invert()
+    return cap
+
+
 def punch_female_sockets_stepwise(
     female: Trimesh,
     *,
@@ -819,49 +897,93 @@ def punch_female_sockets_stepwise(
     hole_radius: float,
 ) -> tuple[Trimesh, list[str], int]:
     """
-    Punch sockets one hole at a time. Reverts a step if extents blow up.
+    Rebuild the cut-cap with clean circular holes, one hole at a time.
+
+    Uses shapely polygon difference + earcut retriangulation so the cut face
+    stays a clean seam outline — no subdivided face-delete streaks.
     """
     notes: list[str] = []
-    out = female.copy()
+    f_mask = _cut_face_mask(female, origin, normal, cos_thresh=0.80, plane_tol_mm=0.75)
+    if not np.any(f_mask):
+        notes.append("female cut cap not found — sockets skipped")
+        return female.copy(), notes, 0
+
+    poly = _cut_face_polygon_2d(female, f_mask, origin, u, v)
+    if poly is None:
+        notes.append("cut-cap polygon failed — sockets skipped")
+        return female.copy(), notes, 0
+
+    working = poly
+    holes_ok = 0
     ext0 = np.asarray(female.extents, dtype=float)
-    total_removed = 0
 
-    for step, center in enumerate(centers_uv, start=1):
-        before = out
-        ext_before = np.asarray(before.extents, dtype=float)
-        faces_before = len(before.faces)
-        punched, n_removed = _punch_one_socket(
-            before,
-            plane_origin=origin,
-            plane_normal=normal,
-            u=u,
-            v=v,
-            center_uv=center,
-            hole_radius=hole_radius,
-        )
-        ext_after = np.asarray(punched.extents, dtype=float)
-        if np.any(ext_after > ext0 * 1.15 + 5.0) or np.any(ext_after > ext_before * 1.1 + 3.0):
-            notes.append(
-                f"hole[{step}] aborted (extent {ext_before.round(1)}→{ext_after.round(1)}); "
-                "keeping previous step"
-            )
+    for step, (pu, pv) in enumerate(centers_uv, start=1):
+        disk = Point(float(pu), float(pv)).buffer(float(hole_radius), resolution=24)
+        if working.intersection(disk).is_empty:
+            # Snap disk onto polygon if center missed solid cap
+            rp = working.representative_point()
+            # nearest point on polygon to desired center
+            try:
+                from shapely.ops import nearest_points
+
+                nearest = nearest_points(working, Point(float(pu), float(pv)))[0]
+                pu, pv = float(nearest.x), float(nearest.y)
+                disk = Point(pu, pv).buffer(float(hole_radius), resolution=24)
+                notes.append(
+                    f"hole[{step}] center snapped onto cap ({pu:.1f},{pv:.1f})"
+                )
+            except Exception:
+                notes.append(f"hole[{step}/{len(centers_uv)}] WARN empty (no cap under center)")
+                continue
+
+        nxt = working.difference(disk)
+        nxt = _largest_polygon(nxt)
+        if nxt is None or nxt.is_empty:
+            notes.append(f"hole[{step}/{len(centers_uv)}] WARN difference empty; skipped")
             continue
-        out = punched
-        total_removed += n_removed
-        status = "ok" if n_removed > 0 else "WARN empty"
+        if nxt.area >= working.area - 1e-6:
+            notes.append(f"hole[{step}/{len(centers_uv)}] WARN no area change; skipped")
+            continue
+
+        # Prefer a single polygon that still has an interior hole when possible
+        n_interiors = len(getattr(nxt, "interiors", []) or [])
+        working = nxt
+        holes_ok += 1
         notes.append(
-            f"hole[{step}/{len(centers_uv)}] center=({center[0]:.1f},{center[1]:.1f}) "
-            f"removed {n_removed} faces ({faces_before}→{len(out.faces)}) [{status}]"
+            f"hole[{step}/{len(centers_uv)}] center=({pu:.1f},{pv:.1f}) "
+            f"polygon hole ok (area {poly.area:.1f}→{working.area:.1f}, "
+            f"interiors={n_interiors}) [ok]"
         )
 
-    if total_removed == 0:
-        notes.append("stepwise cap punch removed 0 faces total")
-    else:
-        notes.append(
-            f"female: stepwise cap_punch removed {total_removed} faces "
-            f"across {len(centers_uv)} hole(s) (no remesh, no wafer)"
+    if holes_ok == 0:
+        notes.append("cap rebuild: 0 holes applied")
+        return female.copy(), notes, 0
+
+    try:
+        cap = _cap_mesh_from_polygon(
+            working, origin=origin, normal=normal, u=u, v=v
         )
-    return out, notes, total_removed
+    except Exception as exc:
+        notes.append(f"cap retriangulation failed ({exc}); female unchanged")
+        return female.copy(), notes, 0
+
+    body = _strip_faces(female, f_mask)
+    out = trimesh.util.concatenate([body, cap])
+    out.merge_vertices()
+
+    ext1 = np.asarray(out.extents, dtype=float)
+    if np.any(ext1 > ext0 * 1.15 + 5.0):
+        notes.append(
+            f"cap rebuild aborted (extent {ext0.round(1)}→{ext1.round(1)}); "
+            "female unchanged"
+        )
+        return female.copy(), notes, 0
+
+    notes.append(
+        f"female: rebuilt cut-cap with {holes_ok} clean circular hole(s) "
+        f"(earcut, no face-delete shred, no remesh)"
+    )
+    return out, notes, holes_ok
 
 
 def apply_mating_pins(
@@ -952,7 +1074,7 @@ def apply_mating_pins(
         )
         notes.extend(hole_notes)
         if n_removed > 0:
-            method = "cap_punch_step" if not apply_male else "male+cap_punch_step"
+            method = "cap_rebuild_step" if not apply_male else "male+cap_rebuild_step"
         elif allow_remesh:
             used_remesh = True
             method = "boolean"
